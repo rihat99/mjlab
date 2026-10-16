@@ -1,4 +1,5 @@
 import math
+import os
 from pathlib import Path
 from typing import Any
 
@@ -346,7 +347,12 @@ def run_sim(
         output_path = Path(output_file)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         print(f"Saving to {output_path}...")
-        np.savez(output_path, **log)
+        # Write then rename, so an interrupted run never leaves a truncated npz
+        # that looks complete. A file object keeps np.savez from adding ".npz".
+        tmp_path = output_path.with_name(output_path.name + ".tmp")
+        with open(tmp_path, "wb") as f:
+          np.savez(f, **log)
+        os.replace(tmp_path, output_path)
 
         if render:
           import mediapy as media

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from dataclasses import asdict, dataclass
@@ -188,12 +189,23 @@ def run_evaluate(task_id: str, cfg: EvaluateConfig) -> dict[str, float]:
     print(f"  {name}: {value:.4f}")
   print("=" * 50)
 
+  motion_path = Path(cfg.motion_file).resolve()
+  provenance = {
+    "task": task_id,
+    "checkpoint_file": str(resume_path.resolve()),
+    "motion_file": str(motion_path),
+    "motion_sha256": hashlib.sha256(motion_path.read_bytes()).hexdigest(),
+    "num_envs": cfg.num_envs,
+    "episode_length_s": env_cfg.episode_length_s,
+    "max_episode_length_steps": env.unwrapped.max_episode_length,
+  }
+
   output_path = Path(
     cfg.output_file or resume_path.with_name(f"eval_{resume_path.stem}.json")
   )
   output_path.parent.mkdir(parents=True, exist_ok=True)
   with open(output_path, "w") as f:
-    json.dump(metrics, f, indent=2)
+    json.dump({**metrics, "provenance": provenance}, f, indent=2)
   print(f"[INFO] Metrics saved to {output_path}")
 
   env.close()

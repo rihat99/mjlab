@@ -2,6 +2,7 @@
 
 import logging
 import os
+import signal
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -134,9 +135,14 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
     runner.load(str(resume_path))
 
-  runner.learn(
-    num_learning_iterations=cfg.agent.max_iterations, init_at_random_ep_len=True
-  )
+  try:
+    runner.learn(
+      num_learning_iterations=cfg.agent.max_iterations, init_at_random_ep_len=True
+    )
+  except BaseException:
+    # Crash, Ctrl-C or SIGTERM: still write the last metrics row and the curves.
+    runner.logger.stop_logging_writer()
+    raise
 
   env.close()
 
@@ -191,6 +197,8 @@ def launch_training(task_id: str, args: TrainConfig | None = None):
 
 def main():
   maybe_print_top_level_help("train")
+  # SIGTERM (kill, job schedulers) unwinds like Ctrl-C, so logs get finalized.
+  signal.signal(signal.SIGTERM, signal.default_int_handler)
 
   # Parse first argument to choose the task.
   # Import tasks to populate the registry.
