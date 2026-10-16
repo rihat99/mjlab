@@ -29,6 +29,8 @@ class MjlabOnPolicyRunner(OnPolicyRunner):
         if train_cfg[key].get("rnn_type") is None:
           for opt in ("rnn_type", "rnn_hidden_dim", "rnn_num_layers"):
             train_cfg[key].pop(opt, None)
+    if train_cfg.get("logger") == "local":
+      train_cfg["logger"] = {"class_name": "mjlab.rl.local_log_writer:LocalLogWriter"}
     super().__init__(env, train_cfg, log_dir, device)
 
   def export_policy_to_onnx(
@@ -68,17 +70,11 @@ class MjlabOnPolicyRunner(OnPolicyRunner):
     """Save checkpoint.
 
     Extends the base implementation to persist the environment's
-    common_step_counter and to respect the ``upload_model`` config flag.
+    common_step_counter.
     """
     env_state = {"common_step_counter": self.env.unwrapped.common_step_counter}
     infos = {**(infos or {}), "env_state": env_state}
-    # Inline base OnPolicyRunner.save() to conditionally gate W&B upload.
-    saved_dict = self.alg.save()
-    saved_dict["iter"] = self.current_learning_iteration
-    saved_dict["infos"] = infos
-    torch.save(saved_dict, path)
-    if self.cfg["upload_model"]:
-      self.logger.save_model(path, self.current_learning_iteration)
+    super().save(path, infos)
 
   def load(
     self,

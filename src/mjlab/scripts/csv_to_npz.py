@@ -1,4 +1,5 @@
 import math
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -19,6 +20,39 @@ from mjlab.utils.lab_api.math import (
 )
 from mjlab.viewer.offscreen_renderer import OffscreenRenderer
 from mjlab.viewer.viewer_config import ViewerConfig
+
+# Column order of the CSV joint angles (Unitree order, = mjlab G1 joint order).
+G1_JOINT_NAMES = (
+  "left_hip_pitch_joint",
+  "left_hip_roll_joint",
+  "left_hip_yaw_joint",
+  "left_knee_joint",
+  "left_ankle_pitch_joint",
+  "left_ankle_roll_joint",
+  "right_hip_pitch_joint",
+  "right_hip_roll_joint",
+  "right_hip_yaw_joint",
+  "right_knee_joint",
+  "right_ankle_pitch_joint",
+  "right_ankle_roll_joint",
+  "waist_yaw_joint",
+  "waist_roll_joint",
+  "waist_pitch_joint",
+  "left_shoulder_pitch_joint",
+  "left_shoulder_roll_joint",
+  "left_shoulder_yaw_joint",
+  "left_elbow_joint",
+  "left_wrist_roll_joint",
+  "left_wrist_pitch_joint",
+  "left_wrist_yaw_joint",
+  "right_shoulder_pitch_joint",
+  "right_shoulder_roll_joint",
+  "right_shoulder_yaw_joint",
+  "right_elbow_joint",
+  "right_wrist_roll_joint",
+  "right_wrist_pitch_joint",
+  "right_wrist_yaw_joint",
+)
 
 
 class MotionLoader:
@@ -191,7 +225,7 @@ def run_sim(
   input_file,
   input_fps,
   output_fps,
-  output_name,
+  output_file,
   render,
   line_range,
   renderer: OffscreenRenderer | None = None,
@@ -309,40 +343,22 @@ def run_sim(
         ):
           log[k] = np.stack(log[k], axis=0)
 
-        print("Saving to /tmp/motion.npz...")
-        np.savez("/tmp/motion.npz", **log)
-
-        print("Uploading to Weights & Biases...")
-        import wandb
-
-        COLLECTION = output_name
-        run = wandb.init(project="csv_to_npz", name=COLLECTION)
-        print(f"[INFO]: Logging motion to wandb: {COLLECTION}")
-        REGISTRY = "motions"
-        logged_artifact = run.log_artifact(
-          artifact_or_path="/tmp/motion.npz", name=COLLECTION, type=REGISTRY
-        )
-        run.link_artifact(
-          artifact=logged_artifact,
-          target_path=f"wandb-registry-{REGISTRY}/{COLLECTION}",
-        )
-        print(f"[INFO]: Motion saved to wandb registry: {REGISTRY}/{COLLECTION}")
+        output_path = Path(output_file)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"Saving to {output_path}...")
+        np.savez(output_path, **log)
 
         if render:
           import mediapy as media
 
-          print("Creating video...")
-          media.write_video("./motion.mp4", frames, fps=output_fps)
-
-          print("Logging video to wandb...")
-          wandb.log({"motion_video": wandb.Video("./motion.mp4", format="mp4")})
-
-        wandb.finish()
+          video_path = output_path.with_suffix(".mp4")
+          print(f"Creating video {video_path}...")
+          media.write_video(str(video_path), frames, fps=output_fps)
 
 
 def main(
   input_file: str,
-  output_name: str,
+  output_file: str,
   input_fps: float = 30.0,
   output_fps: float = 50.0,
   device: str = "cuda:0",
@@ -353,7 +369,7 @@ def main(
 
   Args:
     input_file: Path to the input CSV file.
-    output_name: Path to the output npz file.
+    output_file: Path to the output npz file (the video goes next to it).
     input_fps: Frame rate of the CSV file.
     output_fps: Desired output frame rate.
     device: Device to use.
@@ -395,41 +411,11 @@ def main(
   run_sim(
     sim=sim,
     scene=scene,
-    joint_names=[
-      "left_hip_pitch_joint",
-      "left_hip_roll_joint",
-      "left_hip_yaw_joint",
-      "left_knee_joint",
-      "left_ankle_pitch_joint",
-      "left_ankle_roll_joint",
-      "right_hip_pitch_joint",
-      "right_hip_roll_joint",
-      "right_hip_yaw_joint",
-      "right_knee_joint",
-      "right_ankle_pitch_joint",
-      "right_ankle_roll_joint",
-      "waist_yaw_joint",
-      "waist_roll_joint",
-      "waist_pitch_joint",
-      "left_shoulder_pitch_joint",
-      "left_shoulder_roll_joint",
-      "left_shoulder_yaw_joint",
-      "left_elbow_joint",
-      "left_wrist_roll_joint",
-      "left_wrist_pitch_joint",
-      "left_wrist_yaw_joint",
-      "right_shoulder_pitch_joint",
-      "right_shoulder_roll_joint",
-      "right_shoulder_yaw_joint",
-      "right_elbow_joint",
-      "right_wrist_roll_joint",
-      "right_wrist_pitch_joint",
-      "right_wrist_yaw_joint",
-    ],
+    joint_names=list(G1_JOINT_NAMES),
     input_fps=input_fps,
     input_file=input_file,
     output_fps=output_fps,
-    output_name=output_name,
+    output_file=output_file,
     render=render,
     line_range=line_range,
     renderer=renderer,

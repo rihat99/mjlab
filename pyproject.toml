@@ -50,7 +50,7 @@ dependencies = [
   "rsl-rl-lib==5.5.1",
   "tensorboard>=2.20.0",
   "onnxscript>=0.5.4",
-  "wandb>=0.22.3",
+  "matplotlib",
 ]
 
 [project.urls]

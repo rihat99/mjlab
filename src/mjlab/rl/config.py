@@ -100,14 +100,10 @@ class RslRlBaseRunnerCfg:
   ``--log-root`` on the CLI."""
   run_name: str = ""
   """Optional label appended to the timestamped run directory
-  (e.g. ``2025-01-27_14-30-00_{run_name}``). Also becomes the
-  display name for the run in wandb."""
-  logger: Literal["wandb", "tensorboard"] = "wandb"
-  """The logger to use. Default is wandb."""
-  wandb_project: str = "mjlab"
-  """The wandb project name."""
-  wandb_tags: Tuple[str, ...] = ()
-  """Tags for the wandb run. Default is empty tuple."""
+  (e.g. ``2025-01-27_14-30-00_{run_name}``)."""
+  logger: Literal["local", "tensorboard"] = "local"
+  """The logger to use. ``local`` (default) writes TensorBoard events plus
+  ``metrics.csv`` and ``curves.png`` to the run directory."""
   resume: bool = False
   """Whether to resume the experiment. Default is False."""
   load_run: str = ".*"
@@ -120,9 +116,6 @@ class RslRlBaseRunnerCfg:
   """
   clip_actions: float | None = None
   """The clipping range for action values. If None (default), no clipping is applied."""
-  upload_model: bool = True
-  """Whether to upload model files (.pt, .onnx) to W&B on save. Set to
-  False to keep metric logging but avoid storage usage. Default is True."""
 
 
 @dataclass

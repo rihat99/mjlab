@@ -11,7 +11,6 @@ from typing import cast
 
 import torch
 import tyro
-import wandb
 
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
@@ -25,7 +24,6 @@ from mjlab.tasks.tracking.mdp.metrics import (
   compute_mpkpe,
   compute_root_relative_mpkpe,
 )
-from mjlab.utils.os import get_wandb_checkpoint_path
 from mjlab.utils.torch import configure_torch_backends
 
 
@@ -33,18 +31,17 @@ from mjlab.utils.torch import configure_torch_backends
 class EvaluateConfig:
   """Configuration for policy evaluation."""
 
-  wandb_run_path: str
-  """W&B run path in format 'entity/project/run_id'."""
-  wandb_checkpoint_name: str | None = None
-  """Optional checkpoint name within the W&B run to load (e.g. 'model_4000.pt')."""
+  checkpoint_file: str
+  """Local checkpoint to evaluate (e.g. '<run_dir>/model_4000.pt')."""
+  motion_file: str
+  """Local motion npz the policy tracks."""
   num_envs: int = 1024
   """Number of parallel environments (= number of episodes to evaluate)."""
   device: str | None = None
   """Device to run on. Defaults to CUDA if available."""
   output_file: str | None = None
-  """Optional path to save metrics as JSON."""
-  log_root: str = "logs/rsl_rl"
-  """Root directory under which experiment logs are written."""
+  """Path of the metrics JSON. Defaults to 'eval_<checkpoint stem>.json' next to
+  the checkpoint."""
 
 
 def run_evaluate(task_id: str, cfg: EvaluateConfig) -> dict[str, float]:
@@ -60,13 +57,11 @@ def run_evaluate(task_id: str, cfg: EvaluateConfig) -> dict[str, float]:
   if not isinstance(motion_cmd, MotionCommandCfg):
     raise ValueError(f"Task {task_id} is not a tracking task.")
 
-  # Load motion file from W&B run.
-  api = wandb.Api()
-  run = api.run(cfg.wandb_run_path)
-  art = next((a for a in run.used_artifacts() if a.type == "motions"), None)
-  if art is None:
-    raise RuntimeError("No motion artifact found in the run.")
-  motion_cmd.motion_file = str(Path(art.download()) / "motion.npz")
+  resume_path = Path(cfg.checkpoint_file)
+  for path in (resume_path, Path(cfg.motion_file)):
+    if not path.is_file():
+      raise FileNotFoundError(f"File not found: {path}")
+  motion_cmd.motion_file = cfg.motion_file
 
   # Evaluation config.
   motion_cmd.sampling_mode = "start"
@@ -77,10 +72,6 @@ def run_evaluate(task_id: str, cfg: EvaluateConfig) -> dict[str, float]:
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
   env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
-  log_root_path = (Path(cfg.log_root) / agent_cfg.experiment_name).resolve()
-  resume_path, _ = get_wandb_checkpoint_path(
-    log_root_path, Path(cfg.wandb_run_path), cfg.wandb_checkpoint_name
-  )
   print(f"[INFO] Loading checkpoint: {resume_path}")
 
   runner_cls = load_runner_cls(task_id) or MjlabOnPolicyRunner
@@ -197,12 +188,13 @@ def run_evaluate(task_id: str, cfg: EvaluateConfig) -> dict[str, float]:
     print(f"  {name}: {value:.4f}")
   print("=" * 50)
 
-  if cfg.output_file:
-    output_path = Path(cfg.output_file)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w") as f:
-      json.dump(metrics, f, indent=2)
-    print(f"[INFO] Metrics saved to {output_path}")
+  output_path = Path(
+    cfg.output_file or resume_path.with_name(f"eval_{resume_path.stem}.json")
+  )
+  output_path.parent.mkdir(parents=True, exist_ok=True)
+  with open(output_path, "w") as f:
+    json.dump(metrics, f, indent=2)
+  print(f"[INFO] Metrics saved to {output_path}")
 
   env.close()
   return metrics

@@ -6,7 +6,7 @@ import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal
 
 import tyro
 
@@ -16,9 +16,8 @@ from mjlab.scripts._cli import maybe_print_top_level_help
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
 from mjlab.utils.gpu import select_gpus
-from mjlab.utils.os import dump_yaml, get_checkpoint_path, get_wandb_checkpoint_path
+from mjlab.utils.os import dump_yaml, get_checkpoint_path
 from mjlab.utils.torch import configure_torch_backends
-from mjlab.utils.wandb import add_wandb_tags
 from mjlab.utils.wrappers import VideoRecorder
 
 
@@ -26,7 +25,6 @@ from mjlab.utils.wrappers import VideoRecorder
 class TrainConfig:
   env: ManagerBasedRlEnvCfg
   agent: RslRlBaseRunnerCfg
-  registry_name: str | None = None
   video: bool = False
   video_length: int = 200
   video_interval: int = 2000
@@ -34,9 +32,6 @@ class TrainConfig:
   log_root: str = "logs/rsl_rl"
   """Root directory under which experiment logs are written."""
   torchrunx_log_dir: str | None = None
-  wandb_run_path: str | None = None
-  wandb_checkpoint_name: str | None = None
-  """Optional checkpoint name within the W&B run to load (e.g. 'model_4000.pt')."""
   gpu_ids: list[int] | Literal["all"] | None = field(default_factory=lambda: [0])
 
   @staticmethod
@@ -55,8 +50,9 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
   else:
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     rank = int(os.environ.get("RANK", "0"))
-    # Set EGL device to match the CUDA device.
-    os.environ["MUJOCO_EGL_DEVICE_ID"] = str(local_rank)
+    # Set EGL device to match the CUDA device, unless set by the caller: EGL device
+    # ids are physical GPU ids and ignore CUDA_VISIBLE_DEVICES.
+    os.environ.setdefault("MUJOCO_EGL_DEVICE_ID", str(local_rank))
     device = f"cuda:{local_rank}"
     # Set seed to have diversity in different processes.
     seed = cfg.agent.seed + rank
@@ -68,8 +64,6 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
 
   print(f"[INFO] Training with: device={device}, seed={seed}, rank={rank}")
 
-  registry_name: str | None = None
-
   # Check if this is a tracking task by checking for motion command.
   is_tracking_task = "motion" in cfg.env.commands and isinstance(
     cfg.env.commands["motion"], MotionCommandCfg
@@ -79,25 +73,13 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
     motion_cmd = cfg.env.commands["motion"]
     assert isinstance(motion_cmd, MotionCommandCfg)
 
-    # Check if motion_file is already set (e.g., via CLI --env.commands.motion.motion-file).
-    if motion_cmd.motion_file and Path(motion_cmd.motion_file).exists():
-      print(f"[INFO] Using local motion file: {motion_cmd.motion_file}")
-    elif cfg.registry_name:
-      # Download from WandB registry.
-      registry_name = cast(str, cfg.registry_name)
-      if ":" not in registry_name:
-        registry_name = registry_name + ":latest"
-      import wandb
-
-      api = wandb.Api()
-      artifact = api.artifact(registry_name)
-      motion_cmd.motion_file = str(Path(artifact.download()) / "motion.npz")
-    else:
-      raise ValueError(
-        "For tracking tasks, provide either:\n"
-        "  --registry-name your-org/motions/motion-name (download from WandB)\n"
-        "  --env.commands.motion.motion-file /path/to/motion.npz (local file)"
+    if not motion_cmd.motion_file or not Path(motion_cmd.motion_file).is_file():
+      raise FileNotFoundError(
+        "Tracking tasks need a local motion file: "
+        "--env.commands.motion.motion-file /path/to/motion.npz "
+        f"(got {motion_cmd.motion_file!r})."
       )
+    print(f"[INFO] Using local motion file: {motion_cmd.motion_file}")
 
   # Enable NaN guard if requested.
   if cfg.enable_nan_guard:
@@ -115,24 +97,9 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
 
   resume_path: Path | None = None
   if cfg.agent.resume:
-    if cfg.wandb_run_path is not None:
-      # Load checkpoint from W&B.
-      resume_path, was_cached = get_wandb_checkpoint_path(
-        log_root_path, Path(cfg.wandb_run_path), cfg.wandb_checkpoint_name
-      )
-      if rank == 0:
-        run_id = resume_path.parent.name
-        checkpoint_name = resume_path.name
-        cached_str = "cached" if was_cached else "downloaded"
-        print(
-          f"[INFO]: Loading checkpoint from W&B: {checkpoint_name} "
-          f"(run: {run_id}, {cached_str})"
-        )
-    else:
-      # Load checkpoint from local filesystem.
-      resume_path = get_checkpoint_path(
-        log_root_path, cfg.agent.load_run, cfg.agent.load_checkpoint
-      )
+    resume_path = get_checkpoint_path(
+      log_root_path, cfg.agent.load_run, cfg.agent.load_checkpoint
+    )
 
   # Only record videos on rank 0 to avoid multiple workers writing to the same files.
   if cfg.video and rank == 0:
@@ -154,19 +121,14 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
   if runner_cls is None:
     runner_cls = MjlabOnPolicyRunner
 
-  runner_kwargs = {}
-  if is_tracking_task:
-    runner_kwargs["registry_name"] = registry_name
-
   # Write config files before runner creation, since the runner mutates agent_cfg
   # in-place (e.g., injecting non-serializable objects).
   if rank == 0:
     dump_yaml(log_dir / "params" / "env.yaml", env_cfg)
     dump_yaml(log_dir / "params" / "agent.yaml", agent_cfg)
 
-  runner = runner_cls(env, agent_cfg, str(log_dir), device, **runner_kwargs)
+  runner = runner_cls(env, agent_cfg, str(log_dir), device)
 
-  add_wandb_tags(cfg.agent.wandb_tags)
   runner.add_git_repo_to_log(__file__)
   if resume_path is not None:
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
