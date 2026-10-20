@@ -132,7 +132,8 @@ class JointGainAction(ActionTerm):
 
   @property
   def squash(self) -> torch.Tensor:
-    """``tanh(u / s0)`` of the current raw actions, shape (N, action_dim)."""
+    """Bounded values in (-1, 1) behind the gains in effect, shape (N, action_dim):
+    ``tanh(u / s0)`` of the raw actions, or the equivalent of the frozen values."""
     return self._squash
 
   @property
@@ -173,6 +174,20 @@ class JointGainAction(ActionTerm):
       log_r = torch.zeros_like(log_m)
     return log_m, log_r
 
+  def log_gains_for(self, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """(log m, log r) that ``process_actions(actions)`` puts in effect: the frozen
+    values when frozen, else ``squash_actions(actions)``."""
+    if self._frozen is not None:
+      return self._frozen
+    return self.squash_actions(actions)
+
+  def squash_of(self, log_m: torch.Tensor, log_r: torch.Tensor) -> torch.Tensor:
+    """Bounded values (..., action_dim) that map to the given log multipliers."""
+    z = log_m / self.cfg.log_range
+    if self.cfg.mode == "freq_damp":
+      z = torch.cat([z, log_r / self.cfg.damp_log_range], dim=-1)
+    return z
+
   def freeze(self, log_m: torch.Tensor | None, log_r: torch.Tensor | None = None):
     """Pin the gains to fixed (J,) or (N, J) log multipliers; ``None`` unfreezes."""
     if log_m is None:
@@ -186,13 +201,10 @@ class JointGainAction(ActionTerm):
 
   def process_actions(self, actions: torch.Tensor) -> None:
     self._raw_actions[:] = actions
-    self._squash[:] = torch.tanh(self._raw_actions / self.cfg.s0)
     self._prev_log_m[:] = self._log_m
     self._prev_log_r[:] = self._log_r
-    if self._frozen is not None:
-      self._log_m[:], self._log_r[:] = self._frozen
-    else:
-      self._log_m[:], self._log_r[:] = self.squash_actions(self._raw_actions)
+    self._log_m[:], self._log_r[:] = self.log_gains_for(self._raw_actions)
+    self._squash[:] = self.squash_of(self._log_m, self._log_r)
     self._write_gains()
 
   def apply_actions(self) -> None:
@@ -202,7 +214,6 @@ class JointGainAction(ActionTerm):
     if env_ids is None:
       env_ids = slice(None)
     self._raw_actions[env_ids] = 0.0
-    self._squash[env_ids] = 0.0
     self._log_m[env_ids] = 0.0
     self._log_r[env_ids] = 0.0
     self._prev_log_m[env_ids] = 0.0
@@ -210,6 +221,7 @@ class JointGainAction(ActionTerm):
     if self._frozen is not None:
       self._log_m[env_ids] = self._frozen[0][env_ids]
       self._log_r[env_ids] = self._frozen[1][env_ids]
+    self._squash[env_ids] = self.squash_of(self._log_m[env_ids], self._log_r[env_ids])
     self._write_gains()
 
   def _write_gains(self) -> None:

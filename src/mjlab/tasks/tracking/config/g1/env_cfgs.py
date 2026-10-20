@@ -110,17 +110,10 @@ def unitree_g1_flat_tracking_env_cfg(
 # Variable impedance control (policy-predicted PD gains).
 ##
 
-# Weights of the reward terms shared by the VIC and NewRew tasks, calibrated on a
-# deterministic 16-env rollout of the 88_07 baseline checkpoint (task reward
-# 4.40/step, r_tt 3.05 rad^2/step, torque rate 322 (Nm)^2/step): r_tt costs ~7 %
-# of the task reward, the torque rate ~2 %, and the stiffness cost at log m = ln2
-# on every joint ~1/10 of r_tt. The gain-rate weight is a placeholder (no gain
-# data yet). Each is a RewardTermCfg.weight: ``--env.rewards.<name>.weight``
-# overrides it.
 VIC_TARGET_TRACKING_WEIGHT = -0.1
 VIC_GAIN_RATE_WEIGHT = -0.1
-VIC_STIFFNESS_WEIGHT = -1.5e-3
-VIC_TORQUE_RATE_WEIGHT = -3e-4
+VIC_STIFFNESS_WEIGHT = -1e-2
+VIC_TORQUE_RATE_WEIGHT = -1e-4
 
 
 def unitree_g1_flat_tracking_vic_env_cfg(

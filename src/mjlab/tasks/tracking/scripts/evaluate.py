@@ -66,6 +66,11 @@ def _rollout(
   robot = env.unwrapped.scene["robot"]
   action_manager = env.unwrapped.action_manager
   joint_cols = action_term_slice(env.unwrapped, "joint_pos")
+  gain_cols = (
+    action_term_slice(env.unwrapped, GAIN_ACTION_NAME)
+    if gain_term is not None
+    else slice(0, 0)
+  )
 
   # Metric accumulators.
   all_mpkpe: list[torch.Tensor] = []
@@ -77,6 +82,7 @@ def _rollout(
   all_torque_rate_rms: list[torch.Tensor] = []
   all_action_rate_joint: list[torch.Tensor] = []
   all_active: list[torch.Tensor] = []
+  all_smooth: list[torch.Tensor] = []
   all_log_m: list[torch.Tensor] = []
   all_log_r: list[torch.Tensor] = []
   all_squash: list[torch.Tensor] = []
@@ -109,6 +115,16 @@ def _rollout(
 
     with torch.no_grad():
       actions = policy(obs)
+    if env.clip_actions is not None:
+      actions = torch.clamp(actions, -env.clip_actions, env.clip_actions)
+    if gain_term is not None:
+      # The gains this step is simulated with. After env.step the envs that just
+      # ended are already reset to nominal, so reading the term then would log
+      # the next episode's first state on every terminal row.
+      log_m, log_r = gain_term.log_gains_for(actions[:, gain_cols])
+      all_log_m.append(log_m.clone())
+      all_log_r.append(log_r.clone())
+      all_squash.append(gain_term.squash_of(log_m, log_r))
     obs, _, dones, _ = env.step(actions)
 
     # Pair the snapshotted reference with the post-step robot state.
@@ -135,7 +151,12 @@ def _rollout(
     all_ee_ori_error.append(
       torch.where(active, compute_ee_orientation_error(ref_command, ee_body_names), 0.0)
     )
-    # Smoothness: RMS over joints / actuators of the post-step quantities.
+    # Smoothness: RMS over joints / actuators of the post-step quantities. Envs
+    # that just ended were reset inside env.step, so their row holds the reset
+    # state (zero forces, large accelerations) and is left out.
+    newly_done = dones.bool() & ~done_envs
+    smooth = active & ~newly_done
+    all_smooth.append(smooth.float())
     force = robot.data.actuator_force
     joint_acc_rms = torch.sqrt(torch.mean(torch.square(robot.data.joint_acc), dim=-1))
     torque_rate_rms = torch.sqrt(torch.mean(torch.square(force - prev_force), dim=-1))
@@ -146,19 +167,14 @@ def _rollout(
       dim=-1,
     )
     prev_force = force.clone()
-    all_joint_acc_rms.append(torch.where(active, joint_acc_rms, 0.0))
-    # The first step has no previous force; the env is active, so zero it.
-    all_torque_rate_rms.append(torch.where(active & (step > 0), torque_rate_rms, 0.0))
-    all_action_rate_joint.append(torch.where(active, action_rate_joint, 0.0))
-    if gain_term is not None:
-      all_log_m.append(gain_term.log_m.clone())
-      all_log_r.append(gain_term.log_r.clone())
-      all_squash.append(gain_term.squash.clone())
+    all_joint_acc_rms.append(torch.where(smooth, joint_acc_rms, 0.0))
+    # The first step has no previous force; its row is excluded below.
+    all_torque_rate_rms.append(torch.where(smooth & (step > 0), torque_rate_rms, 0.0))
+    all_action_rate_joint.append(torch.where(smooth, action_rate_joint, 0.0))
 
     # Track completions.
     terminated = env.unwrapped.termination_manager.terminated
     truncated = env.unwrapped.termination_manager.time_outs
-    newly_done = dones.bool() & ~done_envs
 
     if newly_done.any():
       success = success | (newly_done & truncated & ~terminated)
@@ -183,8 +199,12 @@ def _rollout(
   ]
   stacks = [torch.stack(s, dim=0) for s in stacks]
   active_mask = torch.stack(all_active, dim=0)  # (T, N)
+  smooth_mask = torch.stack(all_smooth, dim=0)
   active_steps = active_mask.sum(dim=0).clamp(min=1)
-  means = [s.sum(dim=0) / active_steps for s in stacks]
+  smooth_steps = smooth_mask.sum(dim=0).clamp(min=1)
+  torque_steps = smooth_mask[1:].sum(dim=0).clamp(min=1)  # step 0 has no rate
+  steps = [active_steps] * 5 + [smooth_steps, torque_steps, smooth_steps]
+  means = [s.sum(dim=0) / n for s, n in zip(stacks, steps, strict=True)]
 
   metrics = {
     "success_rate": success.float().mean().item(),
@@ -204,19 +224,21 @@ def _rollout(
     log_r = torch.stack(all_log_r, dim=0)
     squash = torch.stack(all_squash, dim=0)  # (T, N, A)
     mask = active_mask.bool()
-    # Std over the active steps of each env, per joint; mean over envs, joints.
-    log_m_mean_env = (log_m * mask[..., None]).sum(0) / active_steps[:, None]
-    log_m_var_env = (
-      torch.where(mask[..., None], torch.square(log_m - log_m_mean_env), 0.0).sum(0)
-      / active_steps[:, None]
-    )
-    metrics["log_m_mean"] = log_m[mask].mean().item()
+
+    def env_mean(x: torch.Tensor) -> torch.Tensor:
+      """Mean over the active steps of each env: (T, N, K) -> (N, K)."""
+      return (x * mask[..., None]).sum(0) / active_steps[:, None]
+
+    # Per env over its active steps, then mean over envs (and joints).
+    log_m_mean_env = env_mean(log_m)
+    log_m_var_env = env_mean(torch.square(log_m - log_m_mean_env))
+    metrics["log_m_mean"] = log_m_mean_env.mean().item()
     metrics["log_m_std_time"] = torch.sqrt(log_m_var_env).mean().item()
     metrics["gain_frac_bound"] = (
-      (squash[mask].abs() > GAIN_BOUND_THRESHOLD).float().mean().item()
+      env_mean((squash.abs() > GAIN_BOUND_THRESHOLD).float()).mean().item()
     )
     if gain_term.cfg.mode == "freq_damp":
-      metrics["log_r_mean"] = log_r[mask].mean().item()
+      metrics["log_r_mean"] = env_mean(log_r).mean().item()
     arrays["log_m"] = log_m.transpose(0, 1).cpu().numpy()  # (N, T, J)
     arrays["log_r"] = log_r.transpose(0, 1).cpu().numpy()
     arrays["log_m_time_mean"] = log_m[mask].mean(dim=0).cpu().numpy()  # (J,)

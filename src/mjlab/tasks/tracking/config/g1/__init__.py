@@ -24,15 +24,16 @@ register_mjlab_task(
 )
 
 # Policy-predicted PD gains (variable impedance control) and its control arm.
-for _suffix, _gain_mode in (
-  ("Vic-Freq", "freq"),
-  ("Vic-FreqDamp", "freq_damp"),
-  ("NewRew", None),
+# The gain head starts at half the joint head's exploration std.
+for _suffix, _gain_mode, _gain_head_init_std in (
+  ("Vic-Freq", "freq", 0.5),
+  ("Vic-FreqDamp", "freq_damp", 0.5),
+  ("NewRew", None, None),
 ):
   register_mjlab_task(
     task_id=f"Mjlab-Tracking-Flat-Unitree-G1-{_suffix}",
     env_cfg=unitree_g1_flat_tracking_vic_env_cfg(_gain_mode),
     play_env_cfg=unitree_g1_flat_tracking_vic_env_cfg(_gain_mode, play=True),
-    rl_cfg=unitree_g1_tracking_ppo_runner_cfg(),
+    rl_cfg=unitree_g1_tracking_ppo_runner_cfg(_gain_head_init_std),
     runner_cls=MotionTrackingOnPolicyRunner,
   )

@@ -8,6 +8,12 @@ Upcoming version (not yet released)
 Added
 ^^^^^
 
+- Added policy-predicted PD gains (variable impedance control) to G1 motion
+  tracking: the ``JointGainAction`` term, the
+  ``Mjlab-Tracking-Flat-Unitree-G1-Vic-Freq``, ``-Vic-FreqDamp`` and ``-NewRew``
+  tasks with target-tracking, gain-rate, stiffness and torque-rate rewards,
+  ``Gains/*`` training logs, and smoothness, gain and ``--freeze-gains`` metrics
+  in the tracking ``evaluate`` script.
 - Added a ``cu126`` extra (``uv sync --extra cu126``) that installs torch built for
   CUDA 12.6, for machines whose NVIDIA driver is older than 580. It does not include
   kernels for Blackwell GPUs.
