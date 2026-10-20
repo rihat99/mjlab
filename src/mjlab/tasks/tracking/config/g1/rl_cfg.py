@@ -9,10 +9,12 @@ from mjlab.tasks.tracking.rl import TrackingRunnerCfg
 
 def unitree_g1_tracking_ppo_runner_cfg(
   gain_head_init_std: float | None = None,
+  gain_head_std_fixed: bool = False,
 ) -> TrackingRunnerCfg:
   """Create RL runner configuration for Unitree G1 tracking task."""
   return TrackingRunnerCfg(
     gain_head_init_std=gain_head_init_std,
+    gain_head_std_fixed=gain_head_std_fixed,
     actor=RslRlModelCfg(
       hidden_dims=(512, 256, 128),
       activation="elu",

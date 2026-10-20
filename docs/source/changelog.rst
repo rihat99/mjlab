@@ -23,6 +23,10 @@ Added
 Changed
 ^^^^^^^
 
+- The gain head of the ``-Vic-Freq`` and ``-Vic-FreqDamp`` tracking tasks now
+  explores with a fixed std (``TrackingRunnerCfg.gain_head_std_fixed``, 0.5): a
+  learnable gain-head std grew without bound under the entropy bonus once the
+  squashed gain output saturated.
 - Bumped ``rsl-rl-lib`` from 5.5.0 to 5.5.1. This removes the need for capping
   ``wandb`` below 0.29.
 

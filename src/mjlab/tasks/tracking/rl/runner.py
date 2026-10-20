@@ -26,6 +26,10 @@ class TrackingRunnerCfg(RslRlOnPolicyRunnerCfg):
   gain_head_init_std: float | None = None
   """Initial policy std of the gain-head dims (``joint_gain`` action term). None
   keeps the actor's ``init_std`` for every dim."""
+  gain_head_std_fixed: bool = False
+  """Keep the gain-head std at its initial value: its gradient is masked, so the
+  entropy bonus cannot grow it on a tanh-saturated output. The joint head stays
+  learnable."""
 
 
 class _OnnxMotionModel(nn.Module):
@@ -68,6 +72,7 @@ class MotionTrackingOnPolicyRunner(MjlabOnPolicyRunner):
     device: str = "cpu",
   ) -> None:
     gain_head_init_std = train_cfg.pop("gain_head_init_std", None)
+    gain_head_std_fixed = train_cfg.pop("gain_head_std_fixed", False)
     super().__init__(env, train_cfg, log_dir, device)
     action_manager = self.env.unwrapped.action_manager
     self._gain_term: JointGainAction | None = None
@@ -76,11 +81,18 @@ class MotionTrackingOnPolicyRunner(MjlabOnPolicyRunner):
       assert isinstance(term, JointGainAction)
       self._gain_term = term
       self._gain_slice = action_term_slice(self.env.unwrapped, GAIN_ACTION_NAME)
+      distribution = self.alg.get_policy().distribution
+      assert isinstance(distribution, GaussianDistribution)
       if gain_head_init_std is not None:
-        distribution = self.alg.get_policy().distribution
-        assert isinstance(distribution, GaussianDistribution)
         with torch.no_grad():
           distribution.std_param[self._gain_slice] = gain_head_init_std
+      if gain_head_std_fixed:
+        # std_param is one Parameter for both heads; zeroing the gain-head
+        # gradient keeps Adam's update exactly zero there, and the hook lives on
+        # the Parameter object, which load_state_dict() updates in place.
+        grad_mask = torch.ones_like(distribution.std_param)
+        grad_mask[self._gain_slice] = 0.0
+        distribution.std_param.register_hook(lambda grad: grad * grad_mask)
       # rsl_rl's Logger is built inside OnPolicyRunner and only knows the mean
       # std; add the gain statistics of the rollout just collected.
       base_log = self.logger.log
