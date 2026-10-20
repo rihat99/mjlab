@@ -34,3 +34,5 @@ from mjlab.envs.mdp.actions.differential_ik import (
 from mjlab.envs.mdp.actions.differential_ik import (
   DifferentialIKActionCfg as DifferentialIKActionCfg,
 )
+from mjlab.envs.mdp.actions.joint_gain import JointGainAction as JointGainAction
+from mjlab.envs.mdp.actions.joint_gain import JointGainActionCfg as JointGainActionCfg

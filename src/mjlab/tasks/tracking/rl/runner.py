@@ -1,16 +1,31 @@
 import os
+from dataclasses import dataclass
 from typing import cast
 
 import torch
+from rsl_rl.env import VecEnv
+from rsl_rl.modules import GaussianDistribution
 from torch import nn
 
-from mjlab.rl import RslRlVecEnvWrapper
+from mjlab.envs.mdp.actions import JointGainAction
+from mjlab.envs.mdp.rewards import action_term_slice
+from mjlab.rl import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper
 from mjlab.rl.exporter_utils import (
   attach_metadata_to_onnx,
   get_base_metadata,
 )
 from mjlab.rl.runner import MjlabOnPolicyRunner
 from mjlab.tasks.tracking.mdp import MotionCommand
+
+GAIN_ACTION_NAME = "joint_gain"
+GAIN_BOUND_THRESHOLD = 0.95
+
+
+@dataclass
+class TrackingRunnerCfg(RslRlOnPolicyRunnerCfg):
+  gain_head_init_std: float | None = None
+  """Initial policy std of the gain-head dims (``joint_gain`` action term). None
+  keeps the actor's ``init_std`` for every dim."""
 
 
 class _OnnxMotionModel(nn.Module):
@@ -44,6 +59,68 @@ class _OnnxMotionModel(nn.Module):
 
 class MotionTrackingOnPolicyRunner(MjlabOnPolicyRunner):
   env: RslRlVecEnvWrapper
+
+  def __init__(
+    self,
+    env: VecEnv,
+    train_cfg: dict,
+    log_dir: str | None = None,
+    device: str = "cpu",
+  ) -> None:
+    gain_head_init_std = train_cfg.pop("gain_head_init_std", None)
+    super().__init__(env, train_cfg, log_dir, device)
+    action_manager = self.env.unwrapped.action_manager
+    self._gain_term: JointGainAction | None = None
+    if GAIN_ACTION_NAME in action_manager.active_terms:
+      term = action_manager.get_term(GAIN_ACTION_NAME)
+      assert isinstance(term, JointGainAction)
+      self._gain_term = term
+      self._gain_slice = action_term_slice(self.env.unwrapped, GAIN_ACTION_NAME)
+      if gain_head_init_std is not None:
+        distribution = self.alg.get_policy().distribution
+        assert isinstance(distribution, GaussianDistribution)
+        with torch.no_grad():
+          distribution.std_param[self._gain_slice] = gain_head_init_std
+      # rsl_rl's Logger is built inside OnPolicyRunner and only knows the mean
+      # std; add the gain statistics of the rollout just collected.
+      base_log = self.logger.log
+
+      def log_with_gains(*args, **kwargs):
+        self._log_gain_stats(kwargs["it"])
+        base_log(*args, **kwargs)
+
+      self.logger.log = log_with_gains  # type: ignore
+
+  def _log_gain_stats(self, it: int) -> None:
+    writer = self.logger.writer
+    if writer is None or self._gain_term is None:
+      return
+    joint_slice = slice(0, self._gain_slice.start)
+    std = self.alg.get_policy().output_std
+    writer.add_scalar("Gains/std_joint_head", std[..., joint_slice].mean().item(), it)
+    writer.add_scalar(
+      "Gains/std_gain_head", std[..., self._gain_slice].mean().item(), it
+    )
+    # Rollout means (T, N, A): the deterministic gains the policy would apply.
+    params = self.alg.storage.distribution_params
+    assert params is not None
+    mean = params[0][..., self._gain_slice]
+    squash = torch.tanh(mean / self._gain_term.cfg.s0)
+    log_m, log_r = self._gain_term.squash_actions(mean)
+    stats = {"log_m": log_m}
+    if self._gain_term.cfg.mode == "freq_damp":
+      stats["log_r"] = log_r
+    for name, value in stats.items():
+      writer.add_scalar(f"Gains/{name}_mean", value.mean().item(), it)
+      # Std over time and envs, per joint, then averaged over joints.
+      writer.add_scalar(
+        f"Gains/{name}_std", value.flatten(0, 1).std(0).mean().item(), it
+      )
+    writer.add_scalar(
+      "Gains/frac_bound",
+      (squash.abs() > GAIN_BOUND_THRESHOLD).float().mean().item(),
+      it,
+    )
 
   def export_policy_to_onnx(
     self, path: str, filename: str = "policy.onnx", verbose: bool = False

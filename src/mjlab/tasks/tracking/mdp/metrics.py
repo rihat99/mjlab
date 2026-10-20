@@ -4,10 +4,19 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from mjlab.entity import Entity
+from mjlab.envs.mdp.actions import JointGainAction
+from mjlab.managers.metrics_manager import MetricsTermCfg
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.utils.lab_api.math import quat_error_magnitude
 
+from .rewards import target_tracking_l2
+
 if TYPE_CHECKING:
+  from mjlab.envs import ManagerBasedRlEnv
   from mjlab.tasks.tracking.mdp.commands import MotionCommand
+
+_DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
 
 def compute_mpkpe(command: MotionCommand) -> torch.Tensor:
@@ -105,3 +114,63 @@ def _get_body_indices(
       f"Available bodies: {tuple(command.cfg.body_names)}."
     )
   return [name_to_index[name] for name in body_names]
+
+
+##
+# Env-side metrics (MetricsManager terms) for policy-predicted gains.
+##
+
+
+def _gain_term(env: ManagerBasedRlEnv, action_name: str) -> JointGainAction:
+  term = env.action_manager.get_term(action_name)
+  assert isinstance(term, JointGainAction)
+  return term
+
+
+def gain_log_m_mean(env: ManagerBasedRlEnv, action_name: str) -> torch.Tensor:
+  """Mean over joints of the (sampled) log frequency multiplier."""
+  return _gain_term(env, action_name).log_m.mean(dim=-1)
+
+
+def gain_log_m_std(env: ManagerBasedRlEnv, action_name: str) -> torch.Tensor:
+  """Std over joints of the (sampled) log frequency multiplier."""
+  return _gain_term(env, action_name).log_m.std(dim=-1)
+
+
+def gain_log_r_mean(env: ManagerBasedRlEnv, action_name: str) -> torch.Tensor:
+  """Mean over joints of the (sampled) log damping-ratio multiplier."""
+  return _gain_term(env, action_name).log_r.mean(dim=-1)
+
+
+def gain_frac_bound(
+  env: ManagerBasedRlEnv, action_name: str, threshold: float = 0.95
+) -> torch.Tensor:
+  """Fraction of gain dims whose squash ``|tanh(u / s0)|`` exceeds ``threshold``."""
+  squash = _gain_term(env, action_name).squash
+  return (squash.abs() > threshold).float().mean(dim=-1)
+
+
+def target_tracking_sq(
+  env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG
+) -> torch.Tensor:
+  """Raw value of the r_tt term: ``sum_j (q_target_j - q_j)^2``."""
+  return target_tracking_l2(env, asset_cfg)
+
+
+class torque_saturation:
+  """Fraction of actuators at their force limit (use with ``per_substep=True``)."""
+
+  def __init__(self, cfg: MetricsTermCfg, env: ManagerBasedRlEnv):
+    asset: Entity = env.scene[cfg.params["asset_cfg"].name]
+    ctrl_ids = asset.indexing.ctrl_ids[cfg.params["asset_cfg"].actuator_ids]
+    forcerange = env.sim.mj_model.actuator_forcerange[ctrl_ids.cpu().numpy()]
+    self._limit = torch.as_tensor(
+      forcerange[:, 1], dtype=torch.float32, device=env.device
+    )
+
+  def __call__(
+    self, env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg, margin: float = 0.999
+  ) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    force = asset.data.actuator_force[:, asset_cfg.actuator_ids]
+    return (force.abs() >= margin * self._limit).float().mean(dim=-1)

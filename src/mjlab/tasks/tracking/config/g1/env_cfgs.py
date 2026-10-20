@@ -1,13 +1,19 @@
 """Unitree G1 flat tracking environment configurations."""
 
+from typing import Literal
+
 from mjlab.asset_zoo.robots import (
   G1_ACTION_SCALE,
   get_g1_robot_cfg,
 )
 from mjlab.envs import ManagerBasedRlEnvCfg
-from mjlab.envs.mdp.actions import JointPositionActionCfg
+from mjlab.envs.mdp.actions import JointGainActionCfg, JointPositionActionCfg
+from mjlab.managers.metrics_manager import MetricsTermCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg
+from mjlab.managers.reward_manager import RewardTermCfg
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
+from mjlab.tasks.tracking import mdp
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
 from mjlab.tasks.tracking.tracking_env_cfg import make_tracking_env_cfg
 
@@ -96,5 +102,82 @@ def unitree_g1_flat_tracking_env_cfg(
     motion_cmd.velocity_range = {}
 
     motion_cmd.sampling_mode = "start"
+
+  return cfg
+
+
+##
+# Variable impedance control (policy-predicted PD gains).
+##
+
+# Weights of the reward terms shared by the VIC and NewRew tasks, calibrated on a
+# deterministic 16-env rollout of the 88_07 baseline checkpoint (task reward
+# 4.40/step, r_tt 3.05 rad^2/step, torque rate 322 (Nm)^2/step): r_tt costs ~7 %
+# of the task reward, the torque rate ~2 %, and the stiffness cost at log m = ln2
+# on every joint ~1/10 of r_tt. The gain-rate weight is a placeholder (no gain
+# data yet). Each is a RewardTermCfg.weight: ``--env.rewards.<name>.weight``
+# overrides it.
+VIC_TARGET_TRACKING_WEIGHT = -0.1
+VIC_GAIN_RATE_WEIGHT = -0.1
+VIC_STIFFNESS_WEIGHT = -1.5e-3
+VIC_TORQUE_RATE_WEIGHT = -3e-4
+
+
+def unitree_g1_flat_tracking_vic_env_cfg(
+  gain_mode: Literal["freq", "freq_damp"] | None,
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Baseline tracking cfg plus the VIC reward set and, optionally, a gain head.
+
+  ``gain_mode=None`` is the control arm: fixed gains, new rewards only.
+  """
+  cfg = unitree_g1_flat_tracking_env_cfg(play=play)
+  robot_cfg = SceneEntityCfg("robot")
+
+  # The joint head keeps its own action-rate term; gain dims get gain_rate_l2.
+  cfg.rewards["action_rate_l2"] = RewardTermCfg(
+    func=mdp.action_rate_l2, weight=-1e-1, params={"action_name": "joint_pos"}
+  )
+  cfg.rewards["target_tracking_l2"] = RewardTermCfg(
+    func=mdp.target_tracking_l2,
+    weight=VIC_TARGET_TRACKING_WEIGHT,
+    params={"asset_cfg": robot_cfg},
+  )
+  cfg.rewards["torque_rate_l2"] = RewardTermCfg(
+    func=mdp.actuator_force_rate_l2,
+    weight=VIC_TORQUE_RATE_WEIGHT,
+    params={"asset_cfg": robot_cfg},
+  )
+  cfg.metrics = {
+    "target_tracking_sq": MetricsTermCfg(
+      func=mdp.target_tracking_sq, params={"asset_cfg": robot_cfg}
+    ),
+    "torque_saturation": MetricsTermCfg(
+      func=mdp.torque_saturation, params={"asset_cfg": robot_cfg}, per_substep=True
+    ),
+  }
+
+  if gain_mode is not None:
+    cfg.actions["joint_gain"] = JointGainActionCfg(
+      entity_name="robot", actuator_names=(".*",), mode=gain_mode
+    )
+    gain = {"action_name": "joint_gain"}
+    cfg.rewards["gain_rate_l2"] = RewardTermCfg(
+      func=mdp.gain_rate_l2, weight=VIC_GAIN_RATE_WEIGHT, params=gain
+    )
+    cfg.rewards["stiffness_cost"] = RewardTermCfg(
+      func=mdp.stiffness_cost, weight=VIC_STIFFNESS_WEIGHT, params=gain
+    )
+    cfg.metrics["gain_log_m_mean"] = MetricsTermCfg(
+      func=mdp.gain_log_m_mean, params=gain
+    )
+    cfg.metrics["gain_log_m_std"] = MetricsTermCfg(func=mdp.gain_log_m_std, params=gain)
+    cfg.metrics["gain_frac_bound"] = MetricsTermCfg(
+      func=mdp.gain_frac_bound, params=gain
+    )
+    if gain_mode == "freq_damp":
+      cfg.metrics["gain_log_r_mean"] = MetricsTermCfg(
+        func=mdp.gain_log_r_mean, params=gain
+      )
 
   return cfg

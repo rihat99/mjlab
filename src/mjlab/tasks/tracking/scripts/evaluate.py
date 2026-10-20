@@ -8,12 +8,15 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
+import numpy as np
 import torch
 import tyro
 
 from mjlab.envs import ManagerBasedRlEnv
+from mjlab.envs.mdp.actions import JointGainAction
+from mjlab.envs.mdp.rewards import action_term_slice
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
@@ -25,6 +28,7 @@ from mjlab.tasks.tracking.mdp.metrics import (
   compute_mpkpe,
   compute_root_relative_mpkpe,
 )
+from mjlab.tasks.tracking.rl.runner import GAIN_ACTION_NAME, GAIN_BOUND_THRESHOLD
 from mjlab.utils.torch import configure_torch_backends
 
 
@@ -43,46 +47,25 @@ class EvaluateConfig:
   output_file: str | None = None
   """Path of the metrics JSON. Defaults to 'eval_<checkpoint stem>.json' next to
   the checkpoint."""
+  freeze_gains: bool = False
+  """Gain-head tasks only: after the normal pass, re-run with every joint's gain
+  pinned to its mean log multiplier over the first pass (metrics under
+  'frozen_gains' in the JSON)."""
 
 
-def run_evaluate(task_id: str, cfg: EvaluateConfig) -> dict[str, float]:
-  """Run policy evaluation and compute metrics."""
-  configure_torch_backends()
-  device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
-
-  # Load configs.
-  env_cfg = load_env_cfg(task_id, play=False)
-  agent_cfg = load_rl_cfg(task_id)
-
-  motion_cmd = env_cfg.commands.get("motion")
-  if not isinstance(motion_cmd, MotionCommandCfg):
-    raise ValueError(f"Task {task_id} is not a tracking task.")
-
-  resume_path = Path(cfg.checkpoint_file)
-  for path in (resume_path, Path(cfg.motion_file)):
-    if not path.is_file():
-      raise FileNotFoundError(f"File not found: {path}")
-  motion_cmd.motion_file = cfg.motion_file
-
-  # Evaluation config.
-  motion_cmd.sampling_mode = "start"
-  env_cfg.observations["actor"].enable_corruption = True
-  env_cfg.events.pop("push_robot", None)
-  env_cfg.scene.num_envs = cfg.num_envs
-
-  env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
-  env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
-
-  print(f"[INFO] Loading checkpoint: {resume_path}")
-
-  runner_cls = load_runner_cls(task_id) or MjlabOnPolicyRunner
-  runner = runner_cls(env, asdict(agent_cfg), device=device)
-  runner.load(str(resume_path), map_location=device)
-  policy = runner.get_inference_policy(device=device)
-
-  command = cast(MotionCommand, env.unwrapped.command_manager.get_term("motion"))
-  ee_body_names = env_cfg.terminations["ee_body_pos"].params["body_names"]
-  print(f"[INFO] End effector bodies: {ee_body_names}")
+def _rollout(
+  env: RslRlVecEnvWrapper,
+  policy,
+  command: MotionCommand,
+  ee_body_names: tuple[str, ...],
+  gain_term: JointGainAction | None,
+) -> tuple[dict[str, float], dict[str, np.ndarray]]:
+  """Run one episode in every env; return metrics and per-step arrays."""
+  num_envs = env.num_envs
+  device = env.device
+  robot = env.unwrapped.scene["robot"]
+  action_manager = env.unwrapped.action_manager
+  joint_cols = action_term_slice(env.unwrapped, "joint_pos")
 
   # Metric accumulators.
   all_mpkpe: list[torch.Tensor] = []
@@ -90,14 +73,21 @@ def run_evaluate(task_id: str, cfg: EvaluateConfig) -> dict[str, float]:
   all_joint_vel_error: list[torch.Tensor] = []
   all_ee_pos_error: list[torch.Tensor] = []
   all_ee_ori_error: list[torch.Tensor] = []
+  all_joint_acc_rms: list[torch.Tensor] = []
+  all_torque_rate_rms: list[torch.Tensor] = []
+  all_action_rate_joint: list[torch.Tensor] = []
   all_active: list[torch.Tensor] = []
+  all_log_m: list[torch.Tensor] = []
+  all_log_r: list[torch.Tensor] = []
+  all_squash: list[torch.Tensor] = []
 
-  done_envs = torch.zeros(cfg.num_envs, dtype=torch.bool, device=device)
-  success = torch.zeros(cfg.num_envs, dtype=torch.bool, device=device)
+  done_envs = torch.zeros(num_envs, dtype=torch.bool, device=device)
+  success = torch.zeros(num_envs, dtype=torch.bool, device=device)
+  prev_force = robot.data.actuator_force.clone()
 
   obs = env.get_observations()
 
-  print(f"[INFO] Running {cfg.num_envs} evaluation episodes...")
+  print(f"[INFO] Running {num_envs} evaluation episodes...")
 
   step = 0
   while not done_envs.all():
@@ -145,6 +135,25 @@ def run_evaluate(task_id: str, cfg: EvaluateConfig) -> dict[str, float]:
     all_ee_ori_error.append(
       torch.where(active, compute_ee_orientation_error(ref_command, ee_body_names), 0.0)
     )
+    # Smoothness: RMS over joints / actuators of the post-step quantities.
+    force = robot.data.actuator_force
+    joint_acc_rms = torch.sqrt(torch.mean(torch.square(robot.data.joint_acc), dim=-1))
+    torque_rate_rms = torch.sqrt(torch.mean(torch.square(force - prev_force), dim=-1))
+    action_rate_joint = torch.sum(
+      torch.square(
+        action_manager.action[:, joint_cols] - action_manager.prev_action[:, joint_cols]
+      ),
+      dim=-1,
+    )
+    prev_force = force.clone()
+    all_joint_acc_rms.append(torch.where(active, joint_acc_rms, 0.0))
+    # The first step has no previous force; the env is active, so zero it.
+    all_torque_rate_rms.append(torch.where(active & (step > 0), torque_rate_rms, 0.0))
+    all_action_rate_joint.append(torch.where(active, action_rate_joint, 0.0))
+    if gain_term is not None:
+      all_log_m.append(gain_term.log_m.clone())
+      all_log_r.append(gain_term.log_r.clone())
+      all_squash.append(gain_term.squash.clone())
 
     # Track completions.
     terminated = env.unwrapped.termination_manager.terminated
@@ -155,7 +164,7 @@ def run_evaluate(task_id: str, cfg: EvaluateConfig) -> dict[str, float]:
       success = success | (newly_done & truncated & ~terminated)
       done_envs = done_envs | newly_done
       print(
-        f"[INFO] {done_envs.sum().item()}/{cfg.num_envs} episodes completed "
+        f"[INFO] {done_envs.sum().item()}/{num_envs} episodes completed "
         f"(step {step}, truncated={(newly_done & truncated).sum().item()}, "
         f"terminated={(newly_done & terminated).sum().item()})"
       )
@@ -168,9 +177,13 @@ def run_evaluate(task_id: str, cfg: EvaluateConfig) -> dict[str, float]:
     all_joint_vel_error,
     all_ee_pos_error,
     all_ee_ori_error,
+    all_joint_acc_rms,
+    all_torque_rate_rms,
+    all_action_rate_joint,
   ]
   stacks = [torch.stack(s, dim=0) for s in stacks]
-  active_steps = torch.stack(all_active, dim=0).sum(dim=0).clamp(min=1)
+  active_mask = torch.stack(all_active, dim=0)  # (T, N)
+  active_steps = active_mask.sum(dim=0).clamp(min=1)
   means = [s.sum(dim=0) / active_steps for s in stacks]
 
   metrics = {
@@ -180,17 +193,130 @@ def run_evaluate(task_id: str, cfg: EvaluateConfig) -> dict[str, float]:
     "joint_vel_error": means[2].mean().item(),
     "ee_pos_error": means[3].mean().item(),
     "ee_ori_error": means[4].mean().item(),
+    "joint_acc_rms": means[5].mean().item(),
+    "torque_rate_rms": means[6].mean().item(),
+    "action_rate_joint": means[7].mean().item(),
   }
+  arrays = {"active": active_mask.T.cpu().numpy().astype(bool)}  # (N, T)
 
+  if gain_term is not None:
+    log_m = torch.stack(all_log_m, dim=0)  # (T, N, J)
+    log_r = torch.stack(all_log_r, dim=0)
+    squash = torch.stack(all_squash, dim=0)  # (T, N, A)
+    mask = active_mask.bool()
+    # Std over the active steps of each env, per joint; mean over envs, joints.
+    log_m_mean_env = (log_m * mask[..., None]).sum(0) / active_steps[:, None]
+    log_m_var_env = (
+      torch.where(mask[..., None], torch.square(log_m - log_m_mean_env), 0.0).sum(0)
+      / active_steps[:, None]
+    )
+    metrics["log_m_mean"] = log_m[mask].mean().item()
+    metrics["log_m_std_time"] = torch.sqrt(log_m_var_env).mean().item()
+    metrics["gain_frac_bound"] = (
+      (squash[mask].abs() > GAIN_BOUND_THRESHOLD).float().mean().item()
+    )
+    if gain_term.cfg.mode == "freq_damp":
+      metrics["log_r_mean"] = log_r[mask].mean().item()
+    arrays["log_m"] = log_m.transpose(0, 1).cpu().numpy()  # (N, T, J)
+    arrays["log_r"] = log_r.transpose(0, 1).cpu().numpy()
+    arrays["log_m_time_mean"] = log_m[mask].mean(dim=0).cpu().numpy()  # (J,)
+    arrays["log_r_time_mean"] = log_r[mask].mean(dim=0).cpu().numpy()
+
+  return metrics, arrays
+
+
+def _print_metrics(title: str, metrics: dict[str, float]) -> None:
   print("\n" + "=" * 50)
-  print("Evaluation Results")
+  print(title)
   print("=" * 50)
   for name, value in metrics.items():
     print(f"  {name}: {value:.4f}")
   print("=" * 50)
 
+
+def run_evaluate(task_id: str, cfg: EvaluateConfig) -> dict[str, float]:
+  """Run policy evaluation and compute metrics."""
+  configure_torch_backends()
+  device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
+
+  # Load configs.
+  env_cfg = load_env_cfg(task_id, play=False)
+  agent_cfg = load_rl_cfg(task_id)
+
+  motion_cmd = env_cfg.commands.get("motion")
+  if not isinstance(motion_cmd, MotionCommandCfg):
+    raise ValueError(f"Task {task_id} is not a tracking task.")
+
+  resume_path = Path(cfg.checkpoint_file)
+  for path in (resume_path, Path(cfg.motion_file)):
+    if not path.is_file():
+      raise FileNotFoundError(f"File not found: {path}")
+  motion_cmd.motion_file = cfg.motion_file
+
+  # Evaluation config.
+  motion_cmd.sampling_mode = "start"
+  env_cfg.observations["actor"].enable_corruption = True
+  env_cfg.events.pop("push_robot", None)
+  env_cfg.scene.num_envs = cfg.num_envs
+
+  env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
+  env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+
+  print(f"[INFO] Loading checkpoint: {resume_path}")
+
+  runner_cls = load_runner_cls(task_id) or MjlabOnPolicyRunner
+  runner = runner_cls(env, asdict(agent_cfg), device=device)
+  runner.load(str(resume_path), map_location=device)
+  policy = runner.get_inference_policy(device=device)
+
+  command = cast(MotionCommand, env.unwrapped.command_manager.get_term("motion"))
+  ee_body_names = env_cfg.terminations["ee_body_pos"].params["body_names"]
+  print(f"[INFO] End effector bodies: {ee_body_names}")
+
+  gain_term: JointGainAction | None = None
+  if GAIN_ACTION_NAME in env.unwrapped.action_manager.active_terms:
+    term = env.unwrapped.action_manager.get_term(GAIN_ACTION_NAME)
+    assert isinstance(term, JointGainAction)
+    gain_term = term
+  elif cfg.freeze_gains:
+    raise ValueError(f"--freeze-gains needs a '{GAIN_ACTION_NAME}' action term.")
+
+  metrics, arrays = _rollout(env, policy, command, ee_body_names, gain_term)
+  _print_metrics("Evaluation Results", metrics)
+
+  output_path = Path(
+    cfg.output_file or resume_path.with_name(f"eval_{resume_path.stem}.json")
+  )
+  output_path.parent.mkdir(parents=True, exist_ok=True)
+  result: dict[str, Any] = dict(metrics)
+
+  if gain_term is not None:
+    gains_path = output_path.with_name(output_path.stem + "_gains.npz")
+    np.savez_compressed(
+      gains_path,
+      joint_names=np.array(gain_term.joint_names),
+      **arrays,  # type: ignore[invalid-argument-type]
+    )
+    print(f"[INFO] Per-step gains saved to {gains_path}")
+    result["gains_file"] = str(gains_path)
+    result["log_m_time_mean"] = arrays["log_m_time_mean"].tolist()
+
+  if cfg.freeze_gains:
+    assert gain_term is not None
+    gain_term.freeze(
+      torch.as_tensor(arrays["log_m_time_mean"]),
+      torch.as_tensor(arrays["log_r_time_mean"]),
+    )
+    env.unwrapped.reset()
+    frozen_metrics, _ = _rollout(env, policy, command, ee_body_names, gain_term)
+    gain_term.freeze(None)
+    _print_metrics(
+      "Evaluation Results (gains frozen at their time mean)", frozen_metrics
+    )
+    result["frozen_gains"] = frozen_metrics
+
   motion_path = Path(cfg.motion_file).resolve()
-  provenance = {
+  result["provenance"] = {
     "task": task_id,
     "checkpoint_file": str(resume_path.resolve()),
     "motion_file": str(motion_path),
@@ -199,13 +325,8 @@ def run_evaluate(task_id: str, cfg: EvaluateConfig) -> dict[str, float]:
     "episode_length_s": env_cfg.episode_length_s,
     "max_episode_length_steps": env.unwrapped.max_episode_length,
   }
-
-  output_path = Path(
-    cfg.output_file or resume_path.with_name(f"eval_{resume_path.stem}.json")
-  )
-  output_path.parent.mkdir(parents=True, exist_ok=True)
   with open(output_path, "w") as f:
-    json.dump({**metrics, "provenance": provenance}, f, indent=2)
+    json.dump(result, f, indent=2)
   print(f"[INFO] Metrics saved to {output_path}")
 
   env.close()

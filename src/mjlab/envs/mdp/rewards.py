@@ -55,13 +55,32 @@ def joint_acc_l2(
   return torch.sum(torch.square(asset.data.joint_acc[:, asset_cfg.joint_ids]), dim=1)
 
 
-def action_rate_l2(env: ManagerBasedRlEnv) -> torch.Tensor:
+def action_term_slice(env: ManagerBasedRlEnv, action_name: str) -> slice:
+  """Columns of ``action_manager.action`` that belong to one action term."""
+  start = 0
+  for name, dim in zip(
+    env.action_manager.active_terms, env.action_manager.action_term_dim, strict=True
+  ):
+    if name == action_name:
+      return slice(start, start + dim)
+    start += dim
+  raise KeyError(f"Unknown action term: {action_name!r}")
+
+
+def action_rate_l2(
+  env: ManagerBasedRlEnv, action_name: str | None = None
+) -> torch.Tensor:
   """Penalize the rate of change of the actions using L2 squared kernel.
 
-  Operates on raw policy output (before per-term scale/offset).
+  Operates on raw policy output (before per-term scale/offset). With
+  ``action_name`` only that term's dims are penalized.
   """
+  cols = slice(None) if action_name is None else action_term_slice(env, action_name)
   return torch.sum(
-    torch.square(env.action_manager.action - env.action_manager.prev_action), dim=1
+    torch.square(
+      env.action_manager.action[:, cols] - env.action_manager.prev_action[:, cols]
+    ),
+    dim=1,
   )
 
 

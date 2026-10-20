@@ -19,6 +19,8 @@ _PLOTTED_PREFIXES = (
   "Metrics/",
   "Loss/",
   "Policy/",
+  "Gains/",
+  "Episode_Metrics/",
 )
 # Tags under these prefixes share units and are drawn in one panel; every other
 # plotted tag gets its own panel.
