@@ -135,6 +135,11 @@ class ModelInterface(Protocol):
     """Analytic termination rule (B,) bool; diagnostics only (labels come from env)."""
     ...
 
+  def termination_soft(self, s_next: torch.Tensor, frame: torch.Tensor) -> torch.Tensor:
+    """(grad) Termination probability (B,) of s_next against frame: the hard rule's
+    errors through sigmoids."""
+    ...
+
   def clip_end(self, frame: torch.Tensor) -> torch.Tensor:
     """Exclusive end frame (B,) int64 of the clip each frame (B,) belongs to."""
     ...

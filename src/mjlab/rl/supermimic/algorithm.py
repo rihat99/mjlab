@@ -140,7 +140,9 @@ class SuperMimic:
     self._world_model_loss = _maybe_compile(world_model_loss, compile, graphs)
     self._state_heads = _maybe_compile(self.state_heads, compile)
     self._imagine_step = _maybe_compile(self.imagine_step, compile, graphs)
-    self._policy_objective = _maybe_compile(self.policy_objective, compile)
+    # Eager: compiled, its forward matched but its policy gradient did not (cosine
+    # ~0.54 to the eager gradient on identical rollouts, D2 stage H).
+    self._policy_objective = self.policy_objective
     self._critic_loss = _maybe_compile(self.critic_loss, compile, graphs)
 
   def set_learning_rate_scale(self, scale: float) -> None:
@@ -337,7 +339,8 @@ class SuperMimic:
     Lists hold step t at index t: states s_{t+1}, actions a_t, previous actions,
     reward frames k_t (H entries of (B, ...)); features and goals of s_0..s_H (H + 1).
     The termination head d_{t+1} sees s_{t+1} with its goal at k_t, the frame its
-    label is judged against (the policy goal of s_{t+1} starts at k_t + 1).
+    label is judged against (the policy goal of s_{t+1} starts at k_t + 1). With
+    ``analytic_termination`` d_{t+1} is the task's soft rule on s_{t+1} at k_t instead.
 
     Returns:
       loss (), rewards (H, B), terminations (H, B), weighted rewards (H, B),
@@ -355,10 +358,13 @@ class SuperMimic:
     ).view(horizon, num)
     all_features = torch.stack(feature_list)
     all_goals = torch.stack(goal_list)
-    head_goals = self.iface.goal(next_states, frames).view(horizon, num, -1)
-    termination = torch.sigmoid(
-      self.world_model.termination_head(all_features[1:], head_goals)
-    )  # (horizon, B): d_1..d_H
+    if cfg.analytic_termination:
+      termination = self.iface.termination_soft(next_states, frames).view(horizon, num)
+    else:
+      head_goals = self.iface.goal(next_states, frames).view(horizon, num, -1)
+      termination = torch.sigmoid(
+        self.world_model.termination_head(all_features[1:], head_goals)
+      )  # (horizon, B): d_1..d_H
     survival_next = torch.cumprod(1.0 - termination, dim=0)  # c_1..c_H
     survival = torch.cat((torch.ones_like(survival_next[:1]), survival_next[:-1]))
     discount = cfg.gamma ** torch.arange(horizon, device=reward.device).unsqueeze(-1)

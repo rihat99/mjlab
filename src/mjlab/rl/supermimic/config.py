@@ -73,6 +73,10 @@ class PolicyCfg:
   """Imagination executes a + action_noise_std * N(0, 1) (the collection noise,
   detached) like the simulator: the world model, the next observation's previous action
   and the action-rate reward see the noisy action. False: the clean action."""
+  analytic_termination: bool = False
+  """Imagination uses the task's analytic soft termination (iface.termination_soft)
+  instead of the learned head, in the objective and the critic targets (as
+  supermimic_vibed mdp.py:155-162); the head keeps training, for logging."""
 
 
 @dataclass
@@ -119,10 +123,10 @@ class PrecisionCfg:
   tf32: bool = True
   """Allow TF32 matmuls and convolutions (no autocast, no bf16)."""
   compile: bool = True
-  """``torch.compile`` the world-model loss, the imagination (step, objective) and the
-  critic loss (CUDA graphs for the world-model loss, imagined step and critic loss) and
-  use fused Adam: the same math with far fewer kernel launches (~4x faster per
-  iteration at 4096 rollouts). False runs everything eagerly."""
+  """``torch.compile`` the world-model loss, the imagined step, the state heads and the
+  critic loss (CUDA graphs except the state heads) and use fused Adam: the same math
+  with far fewer kernel launches. The policy objective stays eager (its compiled
+  backward was wrong). False runs everything eagerly."""
 
 
 @dataclass

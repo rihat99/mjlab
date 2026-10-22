@@ -154,6 +154,10 @@ class _SyntheticInterface:
     height_error = s_next[:, 2] - self.env.ref_pos[frame, 2]
     return height_error.abs() > HEIGHT_TOLERANCE
 
+  def termination_soft(self, s_next, frame):
+    height_error = s_next[:, 2] - self.env.ref_pos[frame, 2]
+    return torch.sigmoid((height_error.abs() - HEIGHT_TOLERANCE) / 0.01)
+
   def clip_end(self, frame):
     return self.env.clip_end_of_frame[frame]
 
@@ -557,15 +561,20 @@ def test_policy_bptt_update(device):
   assert "critic" in alg.fit_critic(rollout)
 
 
-@pytest.mark.parametrize("flags", [False, True], ids=["frozen_clean", "running_noisy"])
+@pytest.mark.parametrize(
+  "flags", [False, True], ids=["frozen_clean", "running_noisy_analytic"]
+)
 def test_compiled_iteration_matches_eager(device, flags):
   if device == "cpu":
     pytest.skip("the compiled path (torch.compile + CUDA graphs) targets CUDA")
   env = _SyntheticEnv(64, device)
   wm_cfg, policy_cfg, critic_cfg = _small_cfgs()
-  # flags: running world-model statistics and the action noise in imagination.
+  # flags: running world-model statistics, the action noise and the analytic
+  # termination in imagination.
   wm_cfg = replace(wm_cfg, running_statistics=flags)
-  policy_cfg = replace(policy_cfg, imagine_action_noise=flags)
+  policy_cfg = replace(
+    policy_cfg, imagine_action_noise=flags, analytic_termination=flags
+  )
   buffer = _fill_buffer(env, 40)
   losses = {}
   for compile in (False, True):
@@ -582,6 +591,31 @@ def test_compiled_iteration_matches_eager(device, flags):
       losses[compile] = metrics | policy_metrics | alg.fit_critic(rollout)
   for key, eager in losses[False].items():
     torch.testing.assert_close(losses[True][key], eager, rtol=1e-4, atol=1e-8)
+
+
+@pytest.mark.parametrize("analytic", [False, True], ids=["learned_head", "analytic"])
+def test_compiled_policy_gradient_matches_eager(device, analytic):
+  # The losses can agree while the gradients do not (a compiled objective once gave
+  # the right loss with a gradient at cosine ~0.5 to the eager one).
+  if device == "cpu":
+    pytest.skip("the compiled path (torch.compile + CUDA graphs) targets CUDA")
+  env = _SyntheticEnv(64, device)
+  wm_cfg, policy_cfg, critic_cfg = _small_cfgs()
+  policy_cfg = replace(policy_cfg, analytic_termination=analytic)
+  buffer = _fill_buffer(env, 40)
+  grads = []
+  for compile in (False, True):
+    torch.manual_seed(1)  # Same weights, batches, seeds and noise.
+    alg = SuperMimic(
+      env.iface, wm_cfg, policy_cfg, critic_cfg, device, compile, action_noise_std=0.1
+    )
+    alg.fit_world_model_statistics(buffer)
+    alg.fit_world_model(buffer)
+    alg.update_policy(buffer)
+    params = alg.policy.parameters()
+    grads.append(torch.cat([cast(torch.Tensor, p.grad).flatten() for p in params]))
+  cosine = torch.nn.functional.cosine_similarity(grads[0], grads[1], dim=0)
+  assert cosine > 0.99, f"compiled vs eager policy gradient cosine {cosine:.3f}"
 
 
 def test_lambda_returns_hand_computed_h3():

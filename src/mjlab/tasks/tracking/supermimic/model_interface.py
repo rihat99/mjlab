@@ -414,6 +414,32 @@ class TrackingModelInterface:
     )
     return bad_z | bad_tilt
 
+  def termination_soft(
+    self,
+    s_next: torch.Tensor,
+    frame: torch.Tensor,
+    z_temp: float = 0.02,
+    tilt_temp: float = 0.04,
+  ) -> torch.Tensor:
+    """(grad) 1 - (1 - sigmoid((e_z - z_th) / z_temp)) (1 - sigmoid((e_tilt - tilt_th)
+    / tilt_temp)), (B,): the anchor errors of :meth:`termination_hard` for s_next
+    (B, 71) against frame (B,), thresholds from the env cfg (supermimic_vibed's
+    temperatures, mdp.py:155-162)."""
+    anchor_pos, anchor_quat = self._anchor_pose(s_next)
+    motion = self._command.motion
+    _, _, e_z, e_tilt = kernels.anchor_termination(
+      anchor_pos,
+      anchor_quat,
+      motion.body_pos_w[frame, self._anchor],
+      motion.body_quat_w[frame, self._anchor],
+      z_thresh=self._z_threshold,
+      tilt_thresh=self._tilt_threshold,
+    )
+    alive = (1 - torch.sigmoid((e_z - self._z_threshold) / z_temp)) * (
+      1 - torch.sigmoid((e_tilt - self._tilt_threshold) / tilt_temp)
+    )
+    return 1 - alive
+
   # Reset sampler (forwarded to the MotionCommand).
 
   def clip_end(self, frame: torch.Tensor) -> torch.Tensor:

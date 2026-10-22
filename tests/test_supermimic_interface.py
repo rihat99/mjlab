@@ -330,3 +330,26 @@ def test_gradients_are_finite(rollout) -> None:
     iface.reward(s_next, a, a_prev, frames).sum(), s_next
   )
   assert torch.all(reward_grad[0].abs().sum(0)[[0, 3, 7, 10, 13, 42]] > 0)
+
+
+def test_termination_soft(rollout) -> None:
+  _, iface, steps = rollout
+  # Reset states sit on their reference (anchor errors of a few cm / centiradians).
+  s, frames = steps[0]["s"], steps[0]["frame"]
+  states = torch.cat(
+    [s + torch.eye(71, device=s.device)[2] * dz for dz in (0, 0.25, 2)]
+  )
+  states.requires_grad_(True)
+  soft = iface.termination_soft(states, frames.repeat(3)).view(3, NUM_ENVS)
+  inside, near, outside = soft
+  print(f"\nsoft termination inside {inside.max():.1e}, outside {outside.min():.6f}")
+  assert torch.all((soft >= 0) & (soft <= 1))
+  assert torch.all(inside < 1e-3) and torch.all(outside > 1 - 1e-3)
+  # Root raised by the height threshold: the anchor error is near it, d in (0, 1).
+  assert torch.all((near > 0.01) & (near < 0.99))
+  grad = torch.autograd.grad(soft.sum(), states)[0]
+  assert torch.isfinite(grad).all()
+  assert torch.all(grad.view(3, NUM_ENVS, -1)[1, :, 2] > 0)
+  # Where the soft rule is saturated it agrees with the hard rule.
+  hard = iface.termination_hard(states.detach(), frames.repeat(3)).view(3, NUM_ENVS)
+  assert not hard[0].any() and hard[2].all()
