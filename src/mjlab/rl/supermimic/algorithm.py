@@ -87,12 +87,19 @@ class SuperMimic:
     critic_cfg: CriticCfg,
     device: str | torch.device,
     compile: bool = False,
+    action_noise_std: float = 0.0,
   ) -> None:
+    """``action_noise_std`` is the simulator's action noise (the runner passes
+    ``CollectionCfg.action_noise_std``); imagination adds it to the policy action when
+    ``policy_cfg.imagine_action_noise``."""
     self.iface = iface
     self.world_model_cfg = world_model_cfg
     self.policy_cfg = policy_cfg
     self.critic_cfg = critic_cfg
     self.device = torch.device(device)
+    self.imagine_action_noise_std = (
+      action_noise_std if policy_cfg.imagine_action_noise else 0.0
+    )
     self.state = FloatingBaseState(iface.nq)
     assert self.state.state_dim == iface.state_dim
     assert self.state.feature_dim == iface.feature_dim
@@ -190,10 +197,53 @@ class SuperMimic:
     context_all = self.iface.context_normalized()
     self.world_model.fit_statistics(self._statistics_chunks(buffer, context_all))
 
+  @torch.no_grad()
+  def update_world_model_statistics(
+    self, batches: list[dict[str, torch.Tensor]], context_all: torch.Tensor
+  ) -> None:
+    """Running update of the world model's statistics from the logged transitions of
+    sampled windows (real data only, never imagined states).
+
+    Transition m of a window goes from the logged state s_m (s_0, then the targets) to
+    targets[:, m] under actions[:, m]; its head input is the logged next state with its
+    goal at frames[:, m], as in the prefill fit. The moving-average horizon is
+    ``statistics_horizon`` fits of this size.
+    """
+    iface = self.iface
+
+    def cat(key: str) -> torch.Tensor:
+      return torch.cat([windows[key] for windows in batches])
+
+    s0, actions, targets, frames = (
+      cat("s0"),
+      cat("actions"),
+      cat("targets"),
+      cat("frames"),
+    )
+    valid = cat("valid") > 0  # (B, k)
+    num, k = valid.shape
+    next_features, goal = self._state_heads(targets.flatten(0, 1), frames.flatten())
+    next_features = next_features.view(num, k, -1)
+    features = torch.cat(
+      (iface.invariant_features(s0).unsqueeze(1), next_features[:, :-1]), dim=1
+    )
+    states = torch.cat((s0.unsqueeze(1), targets[:, :-1]), dim=1)
+    context = context_all[cat("env_idx")].unsqueeze(1).expand(-1, k, -1)
+    inputs = torch.cat((features, actions, context), dim=-1)[valid]
+    increments = self.state.delta(states, targets)[valid]
+    head_inputs = torch.cat((next_features, goal.view(num, k, -1)), dim=-1)[valid]
+    self.world_model.update_statistics(
+      inputs,
+      increments,
+      head_inputs,
+      max_count=self.world_model_cfg.statistics_horizon * inputs.shape[0],
+    )
+
   def fit_world_model(self, buffer: ReplayBuffer) -> dict[str, torch.Tensor]:
     """``batches_per_update`` Adam steps of the k-step loss; returns mean metrics.
 
-    A step with a non-finite loss or gradient norm is skipped and counted.
+    With ``running_statistics`` the statistics are first updated from the sampled
+    windows. A step with a non-finite loss or gradient norm is skipped and counted.
     """
     cfg = self.world_model_cfg
     context_all = self.iface.context_normalized()
@@ -204,6 +254,8 @@ class SuperMimic:
       buffer.sample_windows(cfg.batch_size, cfg.window_k)
       for _ in range(cfg.batches_per_update)
     ]
+    if cfg.running_statistics:
+      self.update_world_model_statistics(batches, context_all)
     for windows in batches:
       state_loss, termination_loss, last_error = self._world_model_loss(
         self.world_model,
@@ -247,6 +299,7 @@ class SuperMimic:
     context: torch.Tensor,
     env_idx: torch.Tensor,
     next_frame: torch.Tensor,
+    action_noise: torch.Tensor,
   ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """One imagined step without its observation noise (the caller adds it).
 
@@ -256,12 +309,14 @@ class SuperMimic:
       s: (B, S) state; features: (B, F) its invariant features.
       context: (B, C) normalised sim context; env_idx: (B,) env of each row.
       next_frame: (B,) frame the next observation targets.
+      action_noise: (B, A) noise added to the policy action (zeros without
+        ``imagine_action_noise``), drawn by the caller outside the compiled step.
 
     Returns:
-      action (B, A), s_next (B, S), noise-free observation of s_next (B, obs_dim),
-      features (B, F) and goal (B, G) of s_next.
+      executed action a + noise (B, A), s_next (B, S), noise-free observation of s_next
+      (B, obs_dim), features (B, F) and goal (B, G) of s_next.
     """
-    action = self.policy.forward_frames(frames, goal)
+    action = self.policy.forward_frames(frames, goal) + action_noise
     s_next = self.world_model.step(s, features, action, context)
     obs = self.iface.observation(s_next, action, env_idx)
     next_features, next_goal = self.state_heads(s_next, next_frame)
@@ -361,13 +416,21 @@ class SuperMimic:
     frame = seeds["frame0"]
     a_prev = seeds["a_prev"]
     features, goal = self._state_heads(s, frame)
+    # The executed action a + noise drives the world model, the next observation and
+    # the action-rate reward, as in the simulator (whose action_rate_l2 and last_action
+    # read the executed action); the noise is drawn eagerly, like the observation noise.
+    noise_std = self.imagine_action_noise_std
+    no_noise = torch.zeros(num, iface.action_dim, device=self.device)
     # Index t of these lists is step t of the rollout (s_t -> s_{t+1}); features and
     # goals also hold the start state, so they have horizon + 1 entries.
     states, actions, prev_actions, reward_frames = [], [], [], []
     feature_list, goal_list = [features], [goal]
     for _ in range(cfg.horizon):
+      action_noise = (
+        noise_std * torch.randn_like(no_noise) if noise_std > 0.0 else no_noise
+      )
       action, s_next, obs, features, goal = self._imagine_step(
-        frames, goal, s, features, context, env_idx, frame + 1
+        frames, goal, s, features, context, env_idx, frame + 1, action_noise
       )
       obs = iface.add_observation_noise(obs)
       frames = torch.cat((frames[:, 1:], obs.unsqueeze(1)), dim=1)

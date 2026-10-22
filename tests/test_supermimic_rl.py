@@ -8,7 +8,7 @@ extras) and the synthetic interface implements the ModelInterface protocol on it
 """
 
 import math
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from types import SimpleNamespace
 from typing import cast
 
@@ -325,13 +325,15 @@ def _small_cfgs() -> tuple[WorldModelCfg, PolicyCfg, CriticCfg]:
   return world_model, policy, critic
 
 
-def _fill_buffer(env: _SyntheticEnv, steps: int) -> ReplayBuffer:
+def _fill_buffer(
+  env: _SyntheticEnv, steps: int, action_std: float = 0.3
+) -> ReplayBuffer:
   """Collect ``steps`` random-action steps into a buffer, as the runner stores them."""
   buffer = ReplayBuffer(steps + 1, env.num_envs, STATE_DIM, NQ, env.device)
   episode_step = torch.zeros(env.num_envs, dtype=torch.int32, device=env.device)
   for _ in range(steps):
     state, frame = env.state.clone(), env.frame.clone()
-    action = 0.3 * torch.randn(env.num_envs, NQ, device=env.device)
+    action = action_std * torch.randn(env.num_envs, NQ, device=env.device)
     _, reward, dones, _ = env.step(action)
     done = dones.bool()
     assert env.terminal_state is not None
@@ -457,6 +459,51 @@ def test_world_model_k_step_loss_decreases(device):
   assert final < 0.1 * initial, (initial, final)
 
 
+def test_running_world_model_statistics(device):
+  torch.manual_seed(0)
+  env = _SyntheticEnv(64, device)
+  wm_cfg, policy_cfg, critic_cfg = _small_cfgs()
+  prefill = _fill_buffer(env, 40)
+  wider = _fill_buffer(env, 40, action_std=3.0)
+  actions = slice(env.iface.feature_dim, env.iface.feature_dim + NQ)
+  for running in (False, True):
+    cfg = replace(wm_cfg, running_statistics=running)
+    alg = SuperMimic(env.iface, cfg, policy_cfg, critic_cfg, device)
+    alg.fit_world_model_statistics(prefill)
+    model = alg.world_model
+    before = {name: b.clone() for name, b in model.named_buffers()}
+    storage = {name: b.data_ptr() for name, b in model.named_buffers()}
+    alg.fit_world_model(wider)
+    after = dict(model.named_buffers())
+    # Buffers keep their storage: CUDA graphs read them by address.
+    assert storage == {name: b.data_ptr() for name, b in after.items()}
+    changed = {name for name in before if not torch.equal(before[name], after[name])}
+    if not running:
+      assert not changed
+      continue
+    for name in ("input_normalizer", "termination_head.normalizer"):
+      assert {f"{name}._mean", f"{name}._var", f"{name}._std"} <= changed
+    assert "nominal_scale" in changed
+    std_before = before["input_normalizer._std"][0, actions]
+    assert (after["input_normalizer._std"][0, actions] > 2.0 * std_before).all()
+    assert (model.nominal_scale >= model.nominal_floor).all()
+
+  # Moving average: the count is capped at max_count before each update (weight 1/2
+  # here), so increments of zero shrink the scale geometrically down to the floor.
+  num = 256
+  inputs = torch.randn(num, model.input_normalizer.get_buffer("_mean").shape[-1])
+  heads = torch.randn(
+    num, model.termination_head.normalizer.get_buffer("_mean").shape[-1]
+  )
+  zeros = torch.zeros(num, model.state.delta_dim)
+  for _ in range(60):
+    model.update_statistics(
+      inputs.to(device), zeros.to(device), heads.to(device), max_count=num
+    )
+  assert int(model.increment_statistics.get_buffer("count")) == 2 * num
+  torch.testing.assert_close(model.nominal_scale, model.nominal_floor, rtol=0, atol=0)
+
+
 def test_clip_policy_gradients_norm_then_value():
   # Norm first: (0.3, 0.4) -> (0.06, 0.08) -> clamp 0.08 leaves it. Value first would
   # give (0.08, 0.08) -> renormalised (0.0707, 0.0707).
@@ -510,20 +557,29 @@ def test_policy_bptt_update(device):
   assert "critic" in alg.fit_critic(rollout)
 
 
-def test_compiled_iteration_matches_eager(device):
+@pytest.mark.parametrize("flags", [False, True], ids=["frozen_clean", "running_noisy"])
+def test_compiled_iteration_matches_eager(device, flags):
   if device == "cpu":
     pytest.skip("the compiled path (torch.compile + CUDA graphs) targets CUDA")
   env = _SyntheticEnv(64, device)
   wm_cfg, policy_cfg, critic_cfg = _small_cfgs()
+  # flags: running world-model statistics and the action noise in imagination.
+  wm_cfg = replace(wm_cfg, running_statistics=flags)
+  policy_cfg = replace(policy_cfg, imagine_action_noise=flags)
   buffer = _fill_buffer(env, 40)
   losses = {}
   for compile in (False, True):
     torch.manual_seed(1)  # Same initial weights and the same sampled batches.
-    alg = SuperMimic(env.iface, wm_cfg, policy_cfg, critic_cfg, device, compile)
+    alg = SuperMimic(
+      env.iface, wm_cfg, policy_cfg, critic_cfg, device, compile, action_noise_std=0.1
+    )
     alg.fit_world_model_statistics(buffer)
-    metrics = alg.fit_world_model(buffer)
-    policy_metrics, rollout, _ = alg.update_policy(buffer)
-    losses[compile] = metrics | policy_metrics | alg.fit_critic(rollout)
+    # Two iterations: the second one's graphs must read the statistics updated in
+    # place by the first.
+    for _ in range(2):
+      metrics = alg.fit_world_model(buffer)
+      policy_metrics, rollout, _ = alg.update_policy(buffer)
+      losses[compile] = metrics | policy_metrics | alg.fit_critic(rollout)
   for key, eager in losses[False].items():
     torch.testing.assert_close(losses[True][key], eager, rtol=1e-4, atol=1e-8)
 

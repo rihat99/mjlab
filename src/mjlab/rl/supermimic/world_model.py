@@ -11,12 +11,14 @@ from torch import nn
 
 from mjlab.rl.supermimic.config import WorldModelCfg
 from mjlab.rl.supermimic.interface import FloatingBaseState, ModelInterface
+from mjlab.rl.supermimic.networks import _update_in_place
 
 
 class TerminationHead(nn.Module):
   """Termination probability of a state given its goal: d = sigmoid(head(f, g)).
 
-  The input statistics are fitted once from the replay buffer and then frozen.
+  The input statistics come from logged transitions
+  (:meth:`WorldModel.update_statistics`).
   """
 
   def __init__(
@@ -38,9 +40,11 @@ class WorldModel(nn.Module):
   The MLP maps [features(s), a, xi] (normalised) to a normalised increment y; the
   increment is y * nominal_scale and the next state is ``integrate(s, increment)``. The
   last layer is zero-initialised so an untrained model predicts "no change". Input
-  statistics and nominal scales are fitted once from the replay buffer at the end of the
-  prefill (:meth:`fit_statistics`) and then frozen; they are buffers, so they are saved
-  with the state dict.
+  statistics and nominal scales are fitted from the replay buffer at the end of the
+  prefill (:meth:`fit_statistics`) and then either frozen or kept running
+  (:meth:`update_statistics`, ``WorldModelCfg.running_statistics``); they are buffers
+  (saved with the state dict, no gradient) and are updated in place, because the CUDA
+  graphs of the compiled loss and imagination step read them by address.
   """
 
   nominal_scale: torch.Tensor
@@ -71,6 +75,8 @@ class WorldModel(nn.Module):
     self.termination_head = TerminationHead(
       state.feature_dim, goal_dim, cfg.termination_head_hidden
     )
+    # Running statistics of the logged increments; the nominal scale is their std.
+    self.increment_statistics = EmpiricalNormalization(state.delta_dim)
     self.register_buffer("nominal_scale", torch.ones(state.delta_dim))
     self.register_buffer(
       "nominal_floor", state.expand_blocks(cfg.nominal_floor), persistent=False
@@ -105,21 +111,44 @@ class WorldModel(nn.Module):
   def fit_statistics(
     self, chunks: Iterable[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
   ) -> None:
-    """Fit input statistics and nominal scales once from logged transitions; freeze.
+    """Fit input statistics and nominal scales from logged transitions (end of prefill).
 
     Each chunk is (inputs (M, F + A + C) = [features(s), a, xi], increments
     (M, delta_dim) = delta(s, s_next), head inputs (M, F + G) = [features(s_next),
-    goal]). The nominal scale is the per-dim std of the increments, floored.
+    goal]); see :meth:`update_statistics`.
     """
-    increment_stats = EmpiricalNormalization(self.state.delta_dim).to(
-      self.nominal_scale.device
-    )
     for inputs, increments, head_inputs in chunks:
-      self.input_normalizer.update(inputs)
-      self.termination_head.normalizer.update(head_inputs)
-      increment_stats.update(increments)
-    self.nominal_scale.copy_(torch.maximum(increment_stats.std, self.nominal_floor))
+      self.update_statistics(inputs, increments, head_inputs)
     self.statistics_fitted.fill_(True)
+
+  @torch.no_grad()
+  def update_statistics(
+    self,
+    inputs: torch.Tensor,
+    increments: torch.Tensor,
+    head_inputs: torch.Tensor,
+    max_count: int | None = None,
+  ) -> None:
+    """Update the running statistics with logged transitions, in place.
+
+    rsl_rl's running mean / variance of the dynamics inputs (M, F + A + C), the
+    increments (M, delta_dim) and the head inputs (M, F + G); the nominal scale is the
+    per-dim std of the increments, floored by ``nominal_floor``. With ``max_count`` each
+    statistic's sample count is first capped there, which turns the running average
+    into an exponential moving average: M new samples get weight M / (max_count + M).
+    """
+    pairs = (
+      (self.input_normalizer, inputs),
+      (self.termination_head.normalizer, head_inputs),
+      (self.increment_statistics, increments),
+    )
+    for normalizer, x in pairs:
+      if max_count is not None:
+        normalizer.get_buffer("count").clamp_(max=max_count)
+      _update_in_place(normalizer, x)
+    self.nominal_scale.copy_(
+      torch.maximum(self.increment_statistics.std, self.nominal_floor)
+    )
 
 
 def world_model_loss(

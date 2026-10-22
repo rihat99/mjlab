@@ -27,6 +27,16 @@ class WorldModelCfg:
   """(choice) Termination head MLP hidden layers (ELU)."""
   termination_pos_weight: float = 1.0
   """(choice) Positive-class weight of the termination BCE (1.0 = unweighted)."""
+  running_statistics: bool = True
+  """Keep updating the input normaliser, the termination-head input normaliser and the
+  nominal increment scales from the logged (real) transitions of the windows sampled
+  by every world-model fit, before its Adam steps (never from imagined states). False:
+  fitted once at the end of the prefill and frozen (the policy's actions then drift
+  far outside the prefill's action statistics)."""
+  statistics_horizon: int = 100
+  """(choice) With ``running_statistics``: rsl_rl's running mean / variance until the
+  statistics hold this many fits' worth of samples, then an exponential moving average
+  that weighs each fit's samples by 1 / (statistics_horizon + 1)."""
 
 
 @dataclass
@@ -59,6 +69,10 @@ class PolicyCfg:
   """Normalise observation frames and goal with running statistics of sim data."""
   normalizer_freeze_iteration: int = 20000
   """(choice) Iteration after which the observation/goal statistics stop updating."""
+  imagine_action_noise: bool = True
+  """Imagination executes a + action_noise_std * N(0, 1) (the collection noise,
+  detached) like the simulator: the world model, the next observation's previous action
+  and the action-rate reward see the noisy action. False: the clean action."""
 
 
 @dataclass

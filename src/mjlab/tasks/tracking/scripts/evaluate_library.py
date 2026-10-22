@@ -5,7 +5,10 @@ frame, one env per clip, with the task's play cfg (no observation noise, no doma
 randomization, foot friction 1.0, no reset noise) and a deterministic policy. An
 episode ends at the clip end (the ``motion_end`` time-out) or at a training
 termination, which counts as failed. Normalised return = sum of rewards / (max step
-reward x (clip frames - 1)): an episode from frame 0 scores frames 1 .. last.
+reward x (clip frames - 1)): an episode from frame 0 scores frames 1 .. last. The
+per-survived-step normalised return divides by the steps the episode lasted instead
+(the metric of CuboiLeo/SuperMimic-Reproduced); both are equal on a clip that did not
+fail.
 
   python -m mjlab.tasks.tracking.scripts.evaluate_library <task> \
     --checkpoint-file <run>/model_4000.pt --motion-files "('a.npz', 'b.npz')"
@@ -111,6 +114,7 @@ def evaluate_library(
   frames = motion.clip_end - motion.clip_start
   max_return = max_step_reward * (frames - 1)
   normalized = total_reward / max_return
+  survived = total_reward / (max_step_reward * steps)
   clips = [
     {
       "clip": name,
@@ -118,6 +122,7 @@ def evaluate_library(
       "steps": int(steps[c]),
       "return": float(total_reward[c]),
       "normalized_return": float(normalized[c]),
+      "normalized_return_survived": float(survived[c]),
       "failed": bool(failed[c]),
     }
     for c, name in enumerate(motion.clip_names)
@@ -127,6 +132,10 @@ def evaluate_library(
     "num_failed": int(failed.sum()),
     "mean_normalized_return": float(normalized.mean()),
     "frame_weighted_normalized_return": float(total_reward.sum() / max_return.sum()),
+    "mean_normalized_return_survived": float(survived.mean()),
+    "frame_weighted_normalized_return_survived": float(
+      total_reward.sum() / (max_step_reward * steps.sum())
+    ),
     "max_step_reward": max_step_reward,
     "clips": clips,
   }
@@ -162,8 +171,11 @@ def run_evaluate_library(task_id: str, cfg: EvaluateLibraryConfig) -> dict[str, 
   output.parent.mkdir(parents=True, exist_ok=True)
   output.write_text(json.dumps(result, indent=2))
   print(
-    f"[INFO] mean normalised return {result['mean_normalized_return']:.4f}, "
-    f"frame-weighted {result['frame_weighted_normalized_return']:.4f}, "
+    f"[INFO] normalised return per clip length: mean "
+    f"{result['mean_normalized_return']:.4f}, frame-weighted "
+    f"{result['frame_weighted_normalized_return']:.4f}; per survived step: mean "
+    f"{result['mean_normalized_return_survived']:.4f}, frame-weighted "
+    f"{result['frame_weighted_normalized_return_survived']:.4f}; "
     f"failed {result['num_failed']}/{result['num_clips']}; saved {output}"
   )
   env.close()

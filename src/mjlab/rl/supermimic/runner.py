@@ -108,6 +108,7 @@ class SuperMimicRunner:
       self.critic_cfg,
       device,
       compile=precision_cfg.compile,
+      action_noise_std=self.collection_cfg.action_noise_std,
     )
 
     # rsl_rl's Logger reads PPO-shaped keys; give it its own view of the cfg.
