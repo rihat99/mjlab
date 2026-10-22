@@ -74,10 +74,16 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
     motion_cmd = cfg.env.commands["motion"]
     assert isinstance(motion_cmd, MotionCommandCfg)
 
-    if not motion_cmd.motion_file or not Path(motion_cmd.motion_file).is_file():
+    motion_files = (
+      (motion_cmd.motion_file,)
+      if isinstance(motion_cmd.motion_file, str)
+      else motion_cmd.motion_file
+    )
+    if not motion_files or not all(Path(f).is_file() for f in motion_files):
       raise FileNotFoundError(
-        "Tracking tasks need a local motion file: "
+        "Tracking tasks need local motion files: "
         "--env.commands.motion.motion-file /path/to/motion.npz "
+        "(or a library: \"('a.npz', 'b.npz')\") "
         f"(got {motion_cmd.motion_file!r})."
       )
     print(f"[INFO] Using local motion file: {motion_cmd.motion_file}")

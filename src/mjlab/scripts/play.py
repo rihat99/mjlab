@@ -25,7 +25,8 @@ from mjlab.viewer.viser.viewer import CheckpointManager, format_time_ago
 class PlayConfig:
   agent: Literal["zero", "random", "trained"] = "trained"
   checkpoint_file: str | None = None
-  motion_file: str | None = None
+  motion_file: tuple[str, ...] | str | None = None
+  """One npz, or a library as a Python tuple literal \"('a.npz', 'b.npz')\"."""
   num_envs: int | None = None
   device: str | None = None
   video: bool = False
@@ -74,11 +75,15 @@ def run_play(task_id: str, cfg: PlayConfig):
     motion_cmd = env_cfg.commands["motion"]
     assert isinstance(motion_cmd, MotionCommandCfg)
 
-    if cfg.motion_file is None or not Path(cfg.motion_file).is_file():
+    motion_files = (
+      (cfg.motion_file,) if isinstance(cfg.motion_file, str) else cfg.motion_file
+    )
+    if not motion_files or not all(Path(f).is_file() for f in motion_files):
       raise FileNotFoundError(
         "Tracking tasks need a local motion file: --motion-file /path/to/motion.npz "
         f"(got {cfg.motion_file!r})."
       )
+    assert cfg.motion_file is not None
     print(f"[INFO]: Using local motion file: {cfg.motion_file}")
     motion_cmd.motion_file = cfg.motion_file
 

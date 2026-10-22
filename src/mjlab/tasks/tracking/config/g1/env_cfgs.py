@@ -7,10 +7,12 @@ from mjlab.asset_zoo.robots import (
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
+from mjlab.managers.recorder_manager import RecorderTermCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.tasks.tracking import mdp
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
+from mjlab.tasks.tracking.supermimic.recorder import TerminalStateRecorder
 from mjlab.tasks.tracking.tracking_env_cfg import make_tracking_env_cfg
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
@@ -119,8 +121,12 @@ def unitree_g1_flat_tracking_supermimic_env_cfg(
   projected_gravity, actions] (930, flattened term-major, each term's frames oldest
   first) and ``goal`` = 10 future reference frames (670). There is no critic group.
   ``commands.motion.motion_file`` takes a tuple of npz paths (the clip library).
+  The ``terminal_state`` recorder keeps the pre-reset state of auto-reset envs.
   """
   cfg = unitree_g1_flat_tracking_env_cfg(play=play)
+  cfg.recorders["terminal_state"] = RecorderTermCfg(
+    func=TerminalStateRecorder, params={"entity_name": "robot"}
+  )
 
   cfg.events.pop("push_robot", None)
   del cfg.rewards["self_collisions"]

@@ -5,6 +5,7 @@ from mjlab.rl import (
   RslRlOnPolicyRunnerCfg,
   RslRlPpoAlgorithmCfg,
 )
+from mjlab.rl.supermimic import SuperMimicRunnerCfg
 
 
 def unitree_g1_tracking_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
@@ -43,4 +44,14 @@ def unitree_g1_tracking_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
     save_interval=500,
     num_steps_per_env=24,
     max_iterations=30_000,
+  )
+
+
+def unitree_g1_tracking_supermimic_runner_cfg() -> SuperMimicRunnerCfg:
+  """SuperMimic learner for the G1 tracking task (paper Table A.5 defaults)."""
+  return SuperMimicRunnerCfg(
+    experiment_name="g1_tracking_supermimic",
+    model_interface=(
+      "mjlab.tasks.tracking.supermimic.model_interface:TrackingModelInterface"
+    ),
   )

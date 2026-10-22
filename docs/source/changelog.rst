@@ -8,6 +8,17 @@ Upcoming version (not yet released)
 Added
 ^^^^^
 
+- Added SuperMimic, model-based motion tracking over a clip library: the
+  ``mjlab.rl.supermimic`` learner (world model fitted on 8-step windows of a
+  replay buffer, deterministic policy trained by backpropagation through 32-step
+  imagined rollouts, critic, return-based reset sampling) and the
+  ``Mjlab-Tracking-Flat-Unitree-G1-SuperMimic`` task. The task side adds a
+  multi-clip ``MotionCommand`` (``motion_file`` takes a tuple of npz), the
+  ``motion_end`` time-out, a 10-frame future-reference goal observation, pure
+  tracking kernels with a differentiable forward kinematics, the
+  ``TrackingModelInterface`` that evaluates observation, goal, reward and
+  termination on imagined states, a terminal-state recorder, and an
+  ``evaluate_library`` script. ``train`` and ``play`` accept a motion library.
 - Added a ``cu126`` extra (``uv sync --extra cu126``) that installs torch built for
   CUDA 12.6, for machines whose NVIDIA driver is older than 580. It does not include
   kernels for Blackwell GPUs.

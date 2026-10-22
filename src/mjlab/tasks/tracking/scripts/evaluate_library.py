@@ -145,7 +145,9 @@ def run_evaluate_library(task_id: str, cfg: EvaluateLibraryConfig) -> dict[str, 
   env = make_library_env(task_id, cfg.motion_files, device, agent_cfg.clip_actions)
   runner_cls = load_runner_cls(task_id) or MjlabOnPolicyRunner
   runner = runner_cls(env, asdict(agent_cfg), device=device)
-  runner.load(str(checkpoint), map_location=device)
+  runner.load(
+    str(checkpoint), load_cfg={"actor": True}, strict=True, map_location=device
+  )
   policy = runner.get_inference_policy(device=device)
 
   result = evaluate_library(env, policy)
