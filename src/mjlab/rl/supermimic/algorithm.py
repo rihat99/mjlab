@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 
 import torch
@@ -58,6 +58,11 @@ def lambda_returns(
   return torch.stack(returns[::-1])
 
 
+def _maybe_compile(fn: Callable, enabled: bool, mode: str | None = None) -> Callable:
+  """``torch.compile(fn, mode=mode)`` when enabled, else ``fn`` itself."""
+  return torch.compile(fn, mode=mode) if enabled else fn
+
+
 def clip_policy_gradients(
   parameters: Iterable[nn.Parameter], max_norm: float, max_value: float
 ) -> torch.Tensor:
@@ -81,6 +86,7 @@ class SuperMimic:
     policy_cfg: PolicyCfg,
     critic_cfg: CriticCfg,
     device: str | torch.device,
+    compile: bool = False,
   ) -> None:
     self.iface = iface
     self.world_model_cfg = world_model_cfg
@@ -99,14 +105,32 @@ class SuperMimic:
     self.critic = Critic(
       iface.feature_dim + iface.goal_dim + iface.context_dim, critic_cfg.hidden
     ).to(self.device)
+    # With compile, Adam runs fused (one kernel per step, same update rule).
+    fused = True if compile else None
     self.world_model_optimizer = torch.optim.Adam(
-      self.world_model.parameters(), lr=world_model_cfg.lr
+      self.world_model.parameters(), lr=world_model_cfg.lr, fused=fused
     )
     self.policy_optimizer = torch.optim.Adam(
-      self.policy.parameters(), lr=policy_cfg.lr, betas=tuple(policy_cfg.betas)
+      self.policy.parameters(),
+      lr=policy_cfg.lr,
+      betas=tuple(policy_cfg.betas),
+      fused=fused,
     )
-    self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=critic_cfg.lr)
+    self.critic_optimizer = torch.optim.Adam(
+      self.critic.parameters(), lr=critic_cfg.lr, fused=fused
+    )
     self.skipped_policy_steps = 0
+    # Compiled twins of the eager hot paths (same math; random draws stay eager).
+    # "reduce-overhead" adds CUDA graphs, which read parameters and buffers in place:
+    # used where every buffer read keeps its storage (Adam and the policy normalisers
+    # update in place); the objective reads the critic normaliser, which rsl_rl
+    # replaces each iteration, and the state heads also serve variable-size batches.
+    graphs = "reduce-overhead"
+    self._world_model_loss = _maybe_compile(world_model_loss, compile, graphs)
+    self._state_heads = _maybe_compile(self.state_heads, compile)
+    self._imagine_step = _maybe_compile(self.imagine_step, compile, graphs)
+    self._policy_objective = _maybe_compile(self.policy_objective, compile)
+    self._critic_loss = _maybe_compile(self.critic_loss, compile, graphs)
 
   def set_learning_rate_scale(self, scale: float) -> None:
     """Set every optimiser's learning rate to its configured value times ``scale``."""
@@ -135,9 +159,9 @@ class SuperMimic:
     self, s: torch.Tensor, frame: torch.Tensor, env_idx: torch.Tensor
   ) -> torch.Tensor:
     """V (M,) of states s (M, S) whose next observation targets ``frame`` (M,)."""
-    goal = self.iface.goal(s, frame)
+    features, goal = self._state_heads(s, frame)
     context = self.iface.context_normalized()[env_idx]
-    x = self.critic_input(self.iface.invariant_features(s), goal, context)
+    x = self.critic_input(features, goal, context)
     return self.critic(x)
 
   # World model.
@@ -168,9 +192,14 @@ class SuperMimic:
     cfg = self.world_model_cfg
     context_all = self.iface.context_normalized()
     sums = torch.zeros(3, device=self.device)
-    for _ in range(cfg.batches_per_update):
-      windows = buffer.sample_windows(cfg.batch_size, cfg.window_k)
-      state_loss, termination_loss, last_error = world_model_loss(
+    # Sampling syncs with the host; drawing every batch up front (same random stream,
+    # nothing else draws in between) keeps those syncs out of the update loop.
+    batches = [
+      buffer.sample_windows(cfg.batch_size, cfg.window_k)
+      for _ in range(cfg.batches_per_update)
+    ]
+    for windows in batches:
+      state_loss, termination_loss, last_error = self._world_model_loss(
         self.world_model,
         self.iface,
         windows,
@@ -191,6 +220,96 @@ class SuperMimic:
     }
 
   # Policy.
+
+  def state_heads(
+    self, s: torch.Tensor, frame: torch.Tensor
+  ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Invariant features (B, F) and goal (B, G) of states s (B, S) at frame (B,)."""
+    return self.iface.invariant_features(s), self.iface.goal(s, frame)
+
+  def imagine_step(
+    self,
+    frames: torch.Tensor,
+    goal: torch.Tensor,
+    s: torch.Tensor,
+    features: torch.Tensor,
+    context: torch.Tensor,
+    env_idx: torch.Tensor,
+    next_frame: torch.Tensor,
+  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """One imagined step without its observation noise (the caller adds it).
+
+    Args:
+      frames: (B, history, obs_dim) noisy observation frames, oldest first.
+      goal: (B, G) goal of ``s``.
+      s: (B, S) state; features: (B, F) its invariant features.
+      context: (B, C) normalised sim context; env_idx: (B,) env of each row.
+      next_frame: (B,) frame the next observation targets.
+
+    Returns:
+      action (B, A), s_next (B, S), noise-free observation of s_next (B, obs_dim),
+      features (B, F) and goal (B, G) of s_next.
+    """
+    action = self.policy.forward_frames(frames, goal)
+    s_next = self.world_model.step(s, features, action, context)
+    obs = self.iface.observation(s_next, action, env_idx)
+    next_features, next_goal = self.state_heads(s_next, next_frame)
+    return action, s_next, obs, next_features, next_goal
+
+  def policy_objective(
+    self,
+    states: list[torch.Tensor],
+    actions: list[torch.Tensor],
+    prev_actions: list[torch.Tensor],
+    reward_frames: list[torch.Tensor],
+    feature_list: list[torch.Tensor],
+    goal_list: list[torch.Tensor],
+    context: torch.Tensor,
+  ) -> tuple[torch.Tensor, ...]:
+    """Policy loss -mean J of an imagined rollout (Eq. 2), see :meth:`update_policy`.
+
+    Lists hold step t at index t: states s_{t+1}, actions a_t, previous actions,
+    reward frames k_t (H entries of (B, ...)); features and goals of s_0..s_H (H + 1).
+
+    Returns:
+      loss (), rewards (H, B), terminations (H, B), weighted rewards (H, B),
+      survival c_1..c_H (H, B), features (H + 1, B, F), goals (H + 1, B, G).
+    """
+    cfg = self.policy_cfg
+    horizon = len(states)
+    num = states[0].shape[0]
+    # Rewards and terminations do not feed back into the rollout: one batched call each
+    # over (horizon, B), far fewer kernel launches than per step.
+    reward = self.iface.reward(
+      torch.cat(states),
+      torch.cat(actions),
+      torch.cat(prev_actions),
+      torch.cat(reward_frames),
+    ).view(horizon, num)
+    all_features = torch.stack(feature_list)
+    all_goals = torch.stack(goal_list)
+    termination = torch.sigmoid(
+      self.world_model.termination_head(all_features[1:], all_goals[1:])
+    )  # (horizon, B): d_1..d_H
+    survival_next = torch.cumprod(1.0 - termination, dim=0)  # c_1..c_H
+    survival = torch.cat((torch.ones_like(survival_next[:1]), survival_next[:-1]))
+    discount = cfg.gamma ** torch.arange(horizon, device=reward.device).unsqueeze(-1)
+    weighted_reward = survival * reward
+    terminal_value = self.critic(
+      self.critic_input(feature_list[-1], goal_list[-1], context)
+    )
+    objective = (discount * weighted_reward).sum(dim=0)
+    objective = objective + cfg.gamma**horizon * survival_next[-1] * terminal_value
+    loss = -objective.mean()
+    return (
+      loss,
+      reward,
+      termination,
+      weighted_reward,
+      survival_next,
+      all_features,
+      all_goals,
+    )
 
   def update_policy(
     self, buffer: ReplayBuffer
@@ -226,50 +345,43 @@ class SuperMimic:
     s = seeds["s0"]
     frame = seeds["frame0"]
     a_prev = seeds["a_prev"]
-    features = iface.invariant_features(s)
-    goal = iface.goal(s, frame)
+    features, goal = self._state_heads(s, frame)
     # Index t of these lists is step t of the rollout (s_t -> s_{t+1}); features and
     # goals also hold the start state, so they have horizon + 1 entries.
     states, actions, prev_actions, reward_frames = [], [], [], []
     feature_list, goal_list = [features], [goal]
     for _ in range(cfg.horizon):
-      action = self.policy.forward_frames(frames, goal)
-      s_next = self.world_model.step(s, features, action, context)
-      obs = iface.add_observation_noise(iface.observation(s_next, action, env_idx))
+      action, s_next, obs, features, goal = self._imagine_step(
+        frames, goal, s, features, context, env_idx, frame + 1
+      )
+      obs = iface.add_observation_noise(obs)
       frames = torch.cat((frames[:, 1:], obs.unsqueeze(1)), dim=1)
       states.append(s_next)
       actions.append(action)
       prev_actions.append(a_prev)
       reward_frames.append(frame)
       frame = frame + 1
-      features = iface.invariant_features(s_next)
-      goal = iface.goal(s_next, frame)
       feature_list.append(features)
       goal_list.append(goal)
       s, a_prev = s_next, action
 
-    # Rewards and terminations do not feed back into the rollout: one batched call each
-    # over (horizon, B), far fewer kernel launches than per step.
-    horizon = cfg.horizon
-    reward = iface.reward(
-      torch.cat(states),
-      torch.cat(actions),
-      torch.cat(prev_actions),
-      torch.cat(reward_frames),
-    ).view(horizon, num)
-    all_features = torch.stack(feature_list)
-    all_goals = torch.stack(goal_list)
-    termination = torch.sigmoid(
-      self.world_model.termination_head(all_features[1:], all_goals[1:])
-    )  # (horizon, B): d_1..d_H
-    survival_next = torch.cumprod(1.0 - termination, dim=0)  # c_1..c_H
-    survival = torch.cat((torch.ones_like(survival_next[:1]), survival_next[:-1]))
-    discount = cfg.gamma ** torch.arange(horizon, device=self.device).unsqueeze(-1)
-    weighted_reward = survival * reward
-    terminal_value = self.critic(self.critic_input(features, goal, context))
-    objective = (discount * weighted_reward).sum(dim=0)
-    objective = objective + cfg.gamma**horizon * survival_next[-1] * terminal_value
-    loss = -objective.mean()
+    (
+      loss,
+      reward,
+      termination,
+      weighted_reward,
+      survival_next,
+      all_features,
+      all_goals,
+    ) = self._policy_objective(
+      states,
+      actions,
+      prev_actions,
+      reward_frames,
+      feature_list,
+      goal_list,
+      context,
+    )
 
     self.policy_optimizer.zero_grad(set_to_none=True)
     loss.backward()
@@ -300,6 +412,10 @@ class SuperMimic:
 
   # Critic.
 
+  def critic_loss(self, x: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    """Mean squared error () of V on normalised critic inputs x (M, D) vs (M,)."""
+    return (self.critic.mlp(x).squeeze(-1) - targets).square().mean()
+
   def fit_critic(self, rollout: ImaginedRollout) -> dict[str, torch.Tensor]:
     """Fit V to lambda-return targets of the imagined rollout (Eq. 3).
 
@@ -313,8 +429,10 @@ class SuperMimic:
     x = self.critic_input(rollout.features, rollout.goals, context)
     x = x.flatten(0, 1)
     self.critic.normalizer.update(x)
+    # The normaliser stays fixed during the fit: normalise every input once.
+    x = self.critic.normalizer(x)
     with torch.no_grad():
-      values = self.critic(x).view(steps, -1)
+      values = self.critic.mlp(x).view(steps, -1)
       targets = lambda_returns(
         rollout.rewards, rollout.terminations, values, self.policy_cfg.gamma, cfg.lam
       ).flatten()
@@ -325,7 +443,7 @@ class SuperMimic:
       perm = torch.randperm(num, device=self.device)
       for i in range(cfg.minibatches):
         idx = perm[i * minibatch : (i + 1) * minibatch]
-        loss = (self.critic(x[idx]) - targets[idx]).square().mean()
+        loss = self._critic_loss(x[idx], targets[idx])
         self.critic_optimizer.zero_grad(set_to_none=True)
         loss.backward()
         nn.utils.clip_grad_norm_(self.critic.parameters(), cfg.max_grad_norm)

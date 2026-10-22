@@ -505,6 +505,24 @@ def test_policy_bptt_update(device):
   assert "critic" in alg.fit_critic(rollout)
 
 
+def test_compiled_iteration_matches_eager(device):
+  if device == "cpu":
+    pytest.skip("the compiled path (torch.compile + CUDA graphs) targets CUDA")
+  env = _SyntheticEnv(64, device)
+  wm_cfg, policy_cfg, critic_cfg = _small_cfgs()
+  buffer = _fill_buffer(env, 40)
+  losses = {}
+  for compile in (False, True):
+    torch.manual_seed(1)  # Same initial weights and the same sampled batches.
+    alg = SuperMimic(env.iface, wm_cfg, policy_cfg, critic_cfg, device, compile)
+    alg.fit_world_model_statistics(buffer)
+    metrics = alg.fit_world_model(buffer)
+    policy_metrics, rollout = alg.update_policy(buffer)
+    losses[compile] = metrics | policy_metrics | alg.fit_critic(rollout)
+  for key, eager in losses[False].items():
+    torch.testing.assert_close(losses[True][key], eager, rtol=1e-4, atol=1e-8)
+
+
 def test_lambda_returns_hand_computed_h3():
   gamma, lam = 0.9, 0.8
   r = [0.1, 0.2, 0.3]  # r_1, r_2, r_3

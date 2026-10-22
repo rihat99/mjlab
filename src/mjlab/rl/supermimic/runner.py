@@ -102,7 +102,12 @@ class SuperMimicRunner:
       raise ValueError("ModelInterface.obs_term_dims must sum to obs_dim.")
 
     self.alg = SuperMimic(
-      iface, self.world_model_cfg, self.policy_cfg, self.critic_cfg, device
+      iface,
+      self.world_model_cfg,
+      self.policy_cfg,
+      self.critic_cfg,
+      device,
+      compile=precision_cfg.compile,
     )
 
     # rsl_rl's Logger reads PPO-shaped keys; give it its own view of the cfg.

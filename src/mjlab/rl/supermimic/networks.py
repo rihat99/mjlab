@@ -82,9 +82,20 @@ class MotionPolicy(nn.Module):
   def update_normalizers(self, obs_hist: torch.Tensor, goal: torch.Tensor) -> None:
     """Update the running statistics with the newest env history frame and the goal."""
     if isinstance(self.obs_normalizer, EmpiricalNormalization):
-      self.obs_normalizer.update(self.frames_from_env_layout(obs_hist)[:, -1])
+      _update_in_place(
+        self.obs_normalizer, self.frames_from_env_layout(obs_hist)[:, -1]
+      )
     if isinstance(self.goal_normalizer, EmpiricalNormalization):
-      self.goal_normalizer.update(goal)
+      _update_in_place(self.goal_normalizer, goal)
+
+
+def _update_in_place(normalizer: EmpiricalNormalization, x: torch.Tensor) -> None:
+  """``normalizer.update(x)``, keeping the storage of its std buffer (rsl_rl assigns a
+  new tensor): CUDA graphs that read the normaliser stay valid."""
+  std = normalizer.get_buffer("_std")
+  normalizer.update(x)
+  std.copy_(normalizer.get_buffer("_std"))
+  normalizer.register_buffer("_std", std)
 
 
 class Critic(nn.Module):
