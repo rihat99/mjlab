@@ -9,6 +9,7 @@ extras) and the synthetic interface implements the ModelInterface protocol on it
 
 import math
 from dataclasses import asdict
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -119,7 +120,7 @@ class _SyntheticInterface:
 
   def goal(self, s, frame):
     env = self.env
-    offsets = torch.arange(1, FUTURE_FRAMES + 1, device=frame.device)
+    offsets = torch.arange(FUTURE_FRAMES, device=frame.device)
     future = torch.minimum(
       frame.unsqueeze(-1) + offsets, self.clip_end(frame).unsqueeze(-1) - 1
     )
@@ -192,6 +193,9 @@ class _SyntheticEnv:
     self.num_envs = num_envs
     self.device = torch.device(device)
     self.unwrapped = self
+    self.termination_manager = SimpleNamespace(
+      terminated=torch.zeros(num_envs, dtype=torch.bool, device=device)
+    )
     self.cfg: dict = {}
     self.max_episode_length = MAX_EPISODE_LENGTH
     self.episode_length_buf = torch.zeros(num_envs, dtype=torch.long, device=device)
@@ -294,6 +298,7 @@ class _SyntheticEnv:
     motion_end = frame >= self.clip_end_of_frame[frame] - 1
     truncated = (self.episode_length_buf >= self.max_episode_length) | motion_end
     done = terminated | truncated
+    self.termination_manager.terminated = terminated
     self.terminal_state = s1.clone()
     self.state = s1
     self.a_prev = actions.clone()
@@ -327,16 +332,15 @@ def _fill_buffer(env: _SyntheticEnv, steps: int) -> ReplayBuffer:
   for _ in range(steps):
     state, frame = env.state.clone(), env.frame.clone()
     action = 0.3 * torch.randn(env.num_envs, NQ, device=env.device)
-    _, reward, dones, extras = env.step(action)
+    _, reward, dones, _ = env.step(action)
     done = dones.bool()
-    truncated = extras["time_outs"] & done
     assert env.terminal_state is not None
     buffer.add(
       state=state,
       action=action,
       frame=frame,
       reward=reward,
-      terminated=done & ~truncated,
+      terminated=env.termination_manager.terminated,
       done=done,
       terminal_state=env.terminal_state,
       episode_step=episode_step,
@@ -480,7 +484,7 @@ def test_policy_bptt_update(device):
     for module in (alg.world_model, alg.critic)
   }
 
-  metrics, rollout = alg.update_policy(buffer)
+  metrics, rollout, finite = alg.update_policy(buffer)
 
   grads = [p.grad for p in alg.policy.parameters() if p.grad is not None]
   assert grads and all(torch.isfinite(g).all() for g in grads)
@@ -489,6 +493,7 @@ def test_policy_bptt_update(device):
   total_norm = torch.cat([g.flatten() for g in grads]).norm()
   assert float(total_norm) <= policy_cfg.max_grad_norm + 1e-5
   assert torch.isfinite(metrics["policy_grad_norm"]) and metrics["policy_grad_norm"] > 0
+  assert finite
   assert alg.skipped_policy_steps == 0
   assert any(
     not torch.equal(b, p) for b, p in zip(before, alg.policy.parameters(), strict=True)
@@ -517,7 +522,7 @@ def test_compiled_iteration_matches_eager(device):
     alg = SuperMimic(env.iface, wm_cfg, policy_cfg, critic_cfg, device, compile)
     alg.fit_world_model_statistics(buffer)
     metrics = alg.fit_world_model(buffer)
-    policy_metrics, rollout = alg.update_policy(buffer)
+    policy_metrics, rollout, _ = alg.update_policy(buffer)
     losses[compile] = metrics | policy_metrics | alg.fit_critic(rollout)
   for key, eager in losses[False].items():
     torch.testing.assert_close(losses[True][key], eager, rtol=1e-4, atol=1e-8)

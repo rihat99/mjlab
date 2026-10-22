@@ -119,7 +119,8 @@ def unitree_g1_flat_tracking_supermimic_env_cfg(
   termination, and the clip end is a time-out (``motion_end``). Observation groups:
   ``actor`` = 10-frame history of [joint_pos, joint_vel, base_ang_vel,
   projected_gravity, actions] (930, flattened term-major, each term's frames oldest
-  first) and ``goal`` = 10 future reference frames (670). There is no critic group.
+  first) and ``goal`` = reference frames k_t .. k_t + 9 (670), k_t being the frame
+  the next reward is scored against. There is no critic group.
   ``commands.motion.motion_file`` takes a tuple of npz paths (the clip library).
   The ``terminal_state`` recorder keeps the pre-reset state of auto-reset envs.
   """
@@ -172,5 +173,6 @@ def unitree_g1_flat_tracking_supermimic_env_cfg(
     motion_cmd.joint_position_range = (0.0, 0.0)
   else:
     motion_cmd.sampling_mode = "return"
+    cfg.scene.num_envs = 4096  # Paper Table A.5.
 
   return cfg

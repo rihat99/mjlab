@@ -141,9 +141,9 @@ def world_model_loss(
 
   so the model learns to steer its own drift back. The state loss is the mean of e_m^2
   over the delta dims and the valid steps. The termination head sees the predicted
-  state s_hat_m with its goal at frame k_{m-1} + 1 (clamped to the clip) and is trained
-  with BCE against the logged ``terminated`` flag. Gradients flow through the whole
-  window (no detach).
+  state s_hat_m with its goal at frame k_{m-1}, the frame the logged ``terminated``
+  flag was judged against, and is trained with BCE on that flag. Gradients flow
+  through the whole window (no detach).
 
   Args:
     model: the world model.
@@ -175,8 +175,7 @@ def world_model_loss(
   target = model.state.delta(prev, windows["targets"]) / model.nominal_scale
   state_error = (torch.stack(increments, dim=1) - target).square().mean(dim=-1)
   frames = windows["frames"].flatten()
-  goal_frames = torch.minimum(frames + 1, iface.clip_end(frames) - 1)
-  goal = iface.goal(torch.stack(next_states, dim=1).flatten(0, 1), goal_frames)
+  goal = iface.goal(torch.stack(next_states, dim=1).flatten(0, 1), frames)
   logit = model.termination_head(
     torch.stack(next_features, dim=1), goal.view(num, k, -1)
   )

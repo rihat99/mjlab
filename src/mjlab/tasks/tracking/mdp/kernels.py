@@ -308,6 +308,9 @@ def future_frames_goal(
 ) -> torch.Tensor:
   """Goal from K reference frames, each anchor pose seen from the robot anchor.
 
+  The env passes frames k_t .. k_t + K - 1 (``MotionCommand.future_frames``), k_t
+  being the frame the next reward is scored against.
+
   Per frame: reference anchor position (3) and orientation (6) in the robot anchor
   frame (``pose_in_frame``), then reference joint positions (J) and velocities (J).
   Frames are concatenated in order (k-major).

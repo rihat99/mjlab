@@ -58,7 +58,7 @@ class SuperMimicRunner:
 
   The task supplies a :class:`ModelInterface` named by ``train_cfg["model_interface"]``.
   The env must return a TensorDict with ``actor`` (N, history * obs_dim) and ``goal``
-  (N, goal_dim) and report ``extras["time_outs"]``.
+  (N, goal_dim); failures are read from ``env.unwrapped.termination_manager``.
   """
 
   def __init__(
@@ -168,9 +168,11 @@ class SuperMimicRunner:
       t2 = self._clock()
       t3 = t4 = t2
       if it >= col.warmup_world_model_iterations:
-        policy_metrics, rollout = self.alg.update_policy(self.buffer)
+        policy_metrics, rollout, finite = self.alg.update_policy(self.buffer)
         t3 = self._clock()
-        metrics |= policy_metrics | self.alg.fit_critic(rollout)
+        metrics |= policy_metrics
+        if finite:
+          metrics |= self.alg.fit_critic(rollout)
         t4 = self._clock()
       self._accumulate(metrics, (t1 - t0, t2 - t1, t3 - t2, t4 - t3))
       self.current_learning_iteration = it + 1
@@ -276,8 +278,9 @@ class SuperMimicRunner:
       obs, reward, dones, extras = self.env.step(action)
       self.obs = obs.to(self.device)
       done = dones.bool()
-      truncated = extras["time_outs"].bool() & done
-      terminated = done & ~truncated
+      # A failure on the same step as a time-out counts as terminated.
+      terminated = self.env.unwrapped.termination_manager.terminated.clone()
+      truncated = done & ~terminated
       terminal = iface.terminal_state_snapshot()
       if terminal is None:
         if done.any():
@@ -309,8 +312,9 @@ class SuperMimicRunner:
     """Credit the discounted returns of finished episodes to the reset-sampler bins.
 
     The return-to-go G_t is computed backwards from the episode end, bootstrapped with
-    V(s_T) for truncated episodes (0 for terminated ones); every bin the episode entered
-    gets G at its first step in that bin.
+    V(s_T) for truncated episodes (0 for terminated ones, and for all episodes before
+    the critic's first fit); every bin the episode entered gets G at its first step in
+    that bin.
     """
     iface = self.interface
     gamma = self.policy_cfg.gamma
@@ -323,9 +327,11 @@ class SuperMimicRunner:
     rows = torch.arange(env_ids.numel(), device=self.device)
     last_frame = frames[rows, lengths - 1]
     next_frame = torch.minimum(last_frame + 1, iface.clip_end(last_frame) - 1)
-    bootstrap = torch.where(
-      truncated, self.alg.value(terminal, next_frame, env_ids), 0.0
-    ).double()
+    if self.alg.critic_fitted:
+      value = self.alg.value(terminal, next_frame, env_ids)
+    else:
+      value = torch.zeros(env_ids.numel(), device=self.device)
+    bootstrap = torch.where(truncated, value, 0.0).double()
     # Return-to-go by a reverse cumulative sum of discounted rewards, in float64 because
     # it divides by gamma^t (down to ~0.007 for 500 steps).
     discount = gamma ** steps.double()
@@ -336,7 +342,10 @@ class SuperMimicRunner:
     entered = torch.ones_like(mask)
     entered[:, 1:] = bins[:, 1:] != bins[:, :-1]
     first = mask & entered
-    iface.update_bin_returns(bins[first], returns[first].float())
+    first_returns = returns[first].float()
+    if not torch.isfinite(first_returns).all():
+      raise RuntimeError("Non-finite episode return for the reset sampler.")
+    iface.update_bin_returns(bins[first], first_returns)
 
     stats = self._log_stats
     stats["episode_reward_sum"] += rewards.sum()
@@ -403,6 +412,7 @@ class SuperMimicRunner:
       "Metrics/imagined_survival": means.get("imagined_survival"),
       "Metrics/policy_grad_norm": means.get("policy_grad_norm"),
       "Metrics/policy_skipped_steps": float(self.alg.skipped_policy_steps),
+      "Metrics/world_model_skipped_steps": float(self.alg.skipped_world_model_steps),
     }
     if stats["episodes"] > 0:
       length_sum = float(stats["episode_length_sum"])

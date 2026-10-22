@@ -66,7 +66,7 @@ def robot_body_ori_b(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
 def motion_future_frames_b(
   env: ManagerBasedRlEnv, command_name: str, future_frames: int = 10
 ) -> torch.Tensor:
-  """Reference frames k_t + 1 .. k_t + K (clamped to the clip end) seen from the robot.
+  """Reference frames k_t .. k_t + K - 1 (clamped to the clip end) seen from the robot.
 
   See ``kernels.future_frames_goal``. Positions are taken env-local (reference as
   stored, robot minus its env origin), so the goal does not lose float32 precision

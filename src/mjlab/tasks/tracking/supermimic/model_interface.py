@@ -319,7 +319,7 @@ class TrackingModelInterface:
 
   def goal(self, s: torch.Tensor, frame: torch.Tensor) -> torch.Tensor:
     """(grad) Goal (B, 670) of state s (B, 71) at frame (B,): the reference frames
-    frame + 1 .. frame + K (clamped to the clip) seen from the robot anchor, as
+    frame .. frame + K - 1 (clamped to the clip) seen from the robot anchor, as
     ``mdp.motion_future_frames_b``."""
     anchor_pos, anchor_quat = self._anchor_pose(s)
     frames = self._command.future_frames(frame, self._future_frames)

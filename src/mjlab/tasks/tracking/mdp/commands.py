@@ -306,11 +306,11 @@ class MotionCommand(CommandTerm):
     return self.bin_of_frame[frames]
 
   def future_frames(self, frames: torch.Tensor, num_frames: int) -> torch.Tensor:
-    """Frames ``frames + 1 .. frames + num_frames``, clamped to the clip's last frame.
+    """Frames ``frames .. frames + num_frames - 1``, clamped to the clip's last frame.
 
     (B,) -> (B, num_frames).
     """
-    offsets = torch.arange(1, num_frames + 1, device=frames.device)
+    offsets = torch.arange(num_frames, device=frames.device)
     last = self.clip_end_of(frames) - 1
     return torch.minimum(frames.unsqueeze(-1) + offsets, last.unsqueeze(-1))
 

@@ -120,6 +120,10 @@ class SuperMimic:
       self.critic.parameters(), lr=critic_cfg.lr, fused=fused
     )
     self.skipped_policy_steps = 0
+    self.skipped_world_model_steps = 0
+    # An untrained critic's values are noise: the runner bootstraps with them only
+    # once the critic has been fit.
+    self.critic_fitted = False
     # Compiled twins of the eager hot paths (same math; random draws stay eager).
     # "reduce-overhead" adds CUDA graphs, which read parameters and buffers in place:
     # used where every buffer read keeps its storage (Adam and the policy normalisers
@@ -175,8 +179,7 @@ class SuperMimic:
       context = context_all[chunk["env_idx"]]
       inputs = torch.cat((iface.invariant_features(s), chunk["action"], context), -1)
       increments = self.state.delta(s, s_next)
-      frame = chunk["frame"]
-      goal = iface.goal(s_next, torch.minimum(frame + 1, iface.clip_end(frame) - 1))
+      goal = iface.goal(s_next, chunk["frame"])
       head_inputs = torch.cat((iface.invariant_features(s_next), goal), dim=-1)
       yield inputs, increments, head_inputs
 
@@ -188,7 +191,10 @@ class SuperMimic:
     self.world_model.fit_statistics(self._statistics_chunks(buffer, context_all))
 
   def fit_world_model(self, buffer: ReplayBuffer) -> dict[str, torch.Tensor]:
-    """``batches_per_update`` Adam steps of the k-step loss; returns mean metrics."""
+    """``batches_per_update`` Adam steps of the k-step loss; returns mean metrics.
+
+    A step with a non-finite loss or gradient norm is skipped and counted.
+    """
     cfg = self.world_model_cfg
     context_all = self.iface.context_normalized()
     sums = torch.zeros(3, device=self.device)
@@ -209,8 +215,13 @@ class SuperMimic:
       loss = state_loss + termination_loss
       self.world_model_optimizer.zero_grad(set_to_none=True)
       loss.backward()
-      nn.utils.clip_grad_norm_(self.world_model.parameters(), cfg.max_grad_norm)
-      self.world_model_optimizer.step()
+      grad_norm = nn.utils.clip_grad_norm_(
+        self.world_model.parameters(), cfg.max_grad_norm
+      )
+      if torch.isfinite(loss) & torch.isfinite(grad_norm):
+        self.world_model_optimizer.step()
+      else:
+        self.skipped_world_model_steps += 1
       sums += torch.stack((state_loss, termination_loss, last_error)).detach()
     means = sums / cfg.batches_per_update
     return {
@@ -270,6 +281,8 @@ class SuperMimic:
 
     Lists hold step t at index t: states s_{t+1}, actions a_t, previous actions,
     reward frames k_t (H entries of (B, ...)); features and goals of s_0..s_H (H + 1).
+    The termination head d_{t+1} sees s_{t+1} with its goal at k_t, the frame its
+    label is judged against (the policy goal of s_{t+1} starts at k_t + 1).
 
     Returns:
       loss (), rewards (H, B), terminations (H, B), weighted rewards (H, B),
@@ -280,16 +293,16 @@ class SuperMimic:
     num = states[0].shape[0]
     # Rewards and terminations do not feed back into the rollout: one batched call each
     # over (horizon, B), far fewer kernel launches than per step.
+    next_states = torch.cat(states)
+    frames = torch.cat(reward_frames)
     reward = self.iface.reward(
-      torch.cat(states),
-      torch.cat(actions),
-      torch.cat(prev_actions),
-      torch.cat(reward_frames),
+      next_states, torch.cat(actions), torch.cat(prev_actions), frames
     ).view(horizon, num)
     all_features = torch.stack(feature_list)
     all_goals = torch.stack(goal_list)
+    head_goals = self.iface.goal(next_states, frames).view(horizon, num, -1)
     termination = torch.sigmoid(
-      self.world_model.termination_head(all_features[1:], all_goals[1:])
+      self.world_model.termination_head(all_features[1:], head_goals)
     )  # (horizon, B): d_1..d_H
     survival_next = torch.cumprod(1.0 - termination, dim=0)  # c_1..c_H
     survival = torch.cat((torch.ones_like(survival_next[:1]), survival_next[:-1]))
@@ -313,14 +326,16 @@ class SuperMimic:
 
   def update_policy(
     self, buffer: ReplayBuffer
-  ) -> tuple[dict[str, torch.Tensor], ImaginedRollout]:
+  ) -> tuple[dict[str, torch.Tensor], ImaginedRollout, bool]:
     """One BPTT step of the policy on imagined rollouts from replay states (Eq. 2).
 
     J = sum_t gamma^t c_t r_{t+1} + gamma^H c_H V(s_H, g_H, xi),
     c_0 = 1,  c_{t+1} = c_t (1 - d_{t+1}).
     The world model, termination head and critic are frozen (requires_grad False) but
     gradients flow through their inputs. Gradients are clipped by global norm, then
-    element-wise; a step with a non-finite norm is skipped and counted.
+    element-wise; a step with a non-finite loss, rollout or gradient norm is skipped
+    and counted. Returns metrics, the detached rollout and whether the loss and the
+    rollout are finite (the critic must not be fit on a non-finite rollout).
     """
     cfg = self.policy_cfg
     iface = self.iface
@@ -388,7 +403,9 @@ class SuperMimic:
     grad_norm = clip_policy_gradients(
       self.policy.parameters(), cfg.max_grad_norm, cfg.max_grad_value
     )
-    if torch.isfinite(grad_norm):
+    checked = (loss, all_features, all_goals, reward, termination)
+    finite = bool(torch.stack([torch.isfinite(x).all() for x in checked]).all())
+    if finite and torch.isfinite(grad_norm):
       self.policy_optimizer.step()
     else:
       self.skipped_policy_steps += 1
@@ -408,7 +425,7 @@ class SuperMimic:
       terminations=termination.detach(),
       context=context,
     )
-    return metrics, rollout
+    return metrics, rollout, finite
 
   # Critic.
 
@@ -420,8 +437,9 @@ class SuperMimic:
     """Fit V to lambda-return targets of the imagined rollout (Eq. 3).
 
     Targets are computed once with the pre-update critic. The fit runs ``epochs`` x
-    ``minibatches`` Adam steps over all (H + 1) x B imagined states, the last state's
-    target being its own pre-update value.
+    ``minibatches`` Adam steps over the H x B states s_0..s_{H-1}; V(s_H) enters only
+    through the targets. The input normaliser is updated on all H + 1 states, since V
+    is also evaluated at s_H.
     """
     cfg = self.critic_cfg
     steps = rollout.features.shape[0]
@@ -435,7 +453,10 @@ class SuperMimic:
       values = self.critic.mlp(x).view(steps, -1)
       targets = lambda_returns(
         rollout.rewards, rollout.terminations, values, self.policy_cfg.gamma, cfg.lam
-      ).flatten()
+      )
+    # Paper Eq. 3 sums t < H: the last state's target would be its own value.
+    x = x.view(steps, -1, x.shape[-1])[:-1].flatten(0, 1)
+    targets = targets[:-1].flatten()
     num = x.shape[0]
     minibatch = num // cfg.minibatches
     loss_sum = torch.zeros((), device=self.device)
@@ -449,6 +470,7 @@ class SuperMimic:
         nn.utils.clip_grad_norm_(self.critic.parameters(), cfg.max_grad_norm)
         self.critic_optimizer.step()
         loss_sum += loss.detach()
+    self.critic_fitted = True
     return {"critic": loss_sum / (cfg.epochs * cfg.minibatches)}
 
   # Checkpoints.
@@ -463,6 +485,8 @@ class SuperMimic:
       "critic_optimizer_state_dict": self.critic_optimizer.state_dict(),
       "world_model_optimizer_state_dict": self.world_model_optimizer.state_dict(),
       "skipped_policy_steps": self.skipped_policy_steps,
+      "skipped_world_model_steps": self.skipped_world_model_steps,
+      "critic_fitted": self.critic_fitted,
     }
 
   def load_state_dict(self, state: dict, load_cfg: dict, strict: bool) -> None:
@@ -472,6 +496,7 @@ class SuperMimic:
       self.policy.load_state_dict(state["policy_state_dict"], strict=strict)
     if load_cfg.get("critic"):
       self.critic.load_state_dict(state["critic_state_dict"], strict=strict)
+      self.critic_fitted = state["critic_fitted"]
     if load_cfg.get("world_model"):
       self.world_model.load_state_dict(state["world_model_state_dict"], strict=strict)
     if load_cfg.get("optimizer"):
@@ -481,3 +506,4 @@ class SuperMimic:
         state["world_model_optimizer_state_dict"]
       )
       self.skipped_policy_steps = state["skipped_policy_steps"]
+      self.skipped_world_model_steps = state["skipped_world_model_steps"]

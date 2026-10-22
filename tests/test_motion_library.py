@@ -99,7 +99,7 @@ def test_future_frames_clamp_to_clip_end(env: ManagerBasedRlEnv) -> None:
   result = command.future_frames(torch.tensor(frames, device=env.device), 10)
   last = [int(ends[np.searchsorted(ends, f, side="right")]) - 1 for f in frames]
   expected = [
-    [min(f + k, end) for k in range(1, 11)] for f, end in zip(frames, last, strict=True)
+    [min(f + k, end) for k in range(10)] for f, end in zip(frames, last, strict=True)
   ]
   assert result.tolist() == expected
 
@@ -238,7 +238,7 @@ def test_goal_matches_hand_computation(env: ManagerBasedRlEnv) -> None:
   robot_pos = robot_pos.double().cpu().numpy()
   robot_rot = _matrix(command.robot_anchor_quat_w[env_id].double().cpu().numpy())
   expected = []
-  for k in range(1, 11):
+  for k in range(10):
     f = min(frame + k, last)
     ref_pos = motion.body_pos_w[f, anchor].double().cpu().numpy()
     ref_rot = _matrix(motion.body_quat_w[f, anchor].double().cpu().numpy())
