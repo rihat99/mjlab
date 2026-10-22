@@ -4,10 +4,12 @@ import os
 from pathlib import Path
 
 import mujoco
+import numpy as np
 import pytest
 import torch
 import warp as wp
 
+from mjlab.asset_zoo.robots import get_g1_robot_cfg
 from mjlab.entity import Entity, EntityArticulationInfoCfg, EntityCfg
 from mjlab.scene import Scene, SceneCfg
 from mjlab.sim.sim import Simulation, SimulationCfg
@@ -207,3 +209,50 @@ def falling_box_xml() -> str:
       </worldbody>
     </mujoco>
   """
+
+
+def write_g1_motion_npz(path: Path, num_frames: int = 100) -> Path:
+  """Write a 50 Hz G1 reference motion for tracking tests and return its path.
+
+  Knees-bent keyframe walking forward at 0.3 m/s with a 0.5 Hz sinusoid on every
+  joint. Body poses and body-origin velocities come from MuJoCo, in the layout of
+  ``scripts/csv_to_npz.py`` (all robot bodies, world frame).
+  """
+  model = Entity(get_g1_robot_cfg()).compile()
+  data = mujoco.MjData(model)
+  key_qpos = model.key("init_state").qpos
+  time = np.arange(num_frames)[:, None] / 50.0
+  phase = 2 * np.pi * 0.5 * time + np.linspace(0.0, np.pi, model.nq - 7)
+  joint_pos = key_qpos[7:] + 0.2 * np.sin(phase)
+  joint_vel = 0.2 * 2 * np.pi * 0.5 * np.cos(phase)
+  root_vel = np.array([0.3, 0.0, 0.0])
+  bodies = range(1, model.nbody)
+  arrays = {k: [] for k in ("pos", "quat", "lin_vel", "ang_vel")}
+  velocity = np.zeros(6)
+  for frame in range(num_frames):
+    root_pos = key_qpos[:3] + root_vel * time[frame]
+    data.qpos[:] = np.concatenate([root_pos, key_qpos[3:7], joint_pos[frame]])
+    data.qvel[:] = np.concatenate([root_vel, np.zeros(3), joint_vel[frame]])
+    mujoco.mj_forward(model, data)
+    arrays["pos"].append(data.xpos[1:].copy())
+    arrays["quat"].append(data.xquat[1:].copy())
+    lin_vel, ang_vel = [], []
+    for body in bodies:
+      mujoco.mj_objectVelocity(
+        model, data, mujoco.mjtObj.mjOBJ_XBODY, body, velocity, 0
+      )
+      ang_vel.append(velocity[:3].copy())
+      lin_vel.append(velocity[3:].copy())
+    arrays["lin_vel"].append(lin_vel)
+    arrays["ang_vel"].append(ang_vel)
+  np.savez(
+    path,
+    fps=np.array([50.0]),
+    joint_pos=joint_pos.astype(np.float32),
+    joint_vel=joint_vel.astype(np.float32),
+    body_pos_w=np.array(arrays["pos"], dtype=np.float32),
+    body_quat_w=np.array(arrays["quat"], dtype=np.float32),
+    body_lin_vel_w=np.array(arrays["lin_vel"], dtype=np.float32),
+    body_ang_vel_w=np.array(arrays["ang_vel"], dtype=np.float32),
+  )
+  return path

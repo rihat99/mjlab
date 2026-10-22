@@ -11,15 +11,14 @@ import torch
 from mjlab.managers import CommandTerm, CommandTermCfg
 from mjlab.utils.lab_api.math import (
   matrix_from_quat,
-  quat_apply,
   quat_error_magnitude,
   quat_from_euler_xyz,
-  quat_inv,
   quat_mul,
   sample_uniform,
-  yaw_quat,
 )
 from mjlab.viewer.debug_visualizer import DebugVisualizer
+
+from . import kernels
 
 if TYPE_CHECKING:
   from collections.abc import Callable
@@ -382,28 +381,15 @@ class MotionCommand(CommandTerm):
     Called after ``reset_to_frame`` so that termination checks that
     compare relative body positions see the correct state.
     """
-    anchor_pos_w_repeat = self.anchor_pos_w[:, None, :].repeat(
-      1, len(self.cfg.body_names), 1
+    anchor_pos_w = self.anchor_pos_w
+    pos_delta, quat_delta = kernels.anchor_frame(
+      self.robot_anchor_pos_w,
+      self.robot_anchor_quat_w,
+      anchor_pos_w,
+      self.anchor_quat_w,
     )
-    anchor_quat_w_repeat = self.anchor_quat_w[:, None, :].repeat(
-      1, len(self.cfg.body_names), 1
-    )
-    robot_anchor_pos_w_repeat = self.robot_anchor_pos_w[:, None, :].repeat(
-      1, len(self.cfg.body_names), 1
-    )
-    robot_anchor_quat_w_repeat = self.robot_anchor_quat_w[:, None, :].repeat(
-      1, len(self.cfg.body_names), 1
-    )
-
-    delta_pos_w = robot_anchor_pos_w_repeat
-    delta_pos_w[..., 2] = anchor_pos_w_repeat[..., 2]
-    delta_ori_w = yaw_quat(
-      quat_mul(robot_anchor_quat_w_repeat, quat_inv(anchor_quat_w_repeat))
-    )
-
-    self.body_quat_relative_w = quat_mul(delta_ori_w, self.body_quat_w)
-    self.body_pos_relative_w = delta_pos_w + quat_apply(
-      delta_ori_w, self.body_pos_w - anchor_pos_w_repeat
+    self.body_pos_relative_w, self.body_quat_relative_w = kernels.relative_body_targets(
+      self.body_pos_w, self.body_quat_w, anchor_pos_w, pos_delta, quat_delta
     )
 
   def reset(self, env_ids: torch.Tensor | slice | None) -> dict[str, float]:

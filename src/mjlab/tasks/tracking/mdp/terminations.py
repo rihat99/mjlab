@@ -4,13 +4,11 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
-from mjlab.utils.lab_api.math import quat_apply_inverse
-
+from . import kernels
 from .commands import MotionCommand
 from .rewards import _get_body_indexes
 
 if TYPE_CHECKING:
-  from mjlab.entity import Entity
   from mjlab.envs import ManagerBasedRlEnv
   from mjlab.managers.scene_entity_config import SceneEntityCfg
 
@@ -28,29 +26,19 @@ def bad_anchor_pos_z_only(
   env: ManagerBasedRlEnv, command_name: str, threshold: float
 ) -> torch.Tensor:
   command = cast(MotionCommand, env.command_manager.get_term(command_name))
-  return (
-    torch.abs(command.anchor_pos_w[:, -1] - command.robot_anchor_pos_w[:, -1])
-    > threshold
-  )
+  error = kernels.anchor_height_error(command.robot_anchor_pos_w, command.anchor_pos_w)
+  return error > threshold
 
 
 def bad_anchor_ori(
   env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg, command_name: str, threshold: float
 ) -> torch.Tensor:
-  asset: Entity = env.scene[asset_cfg.name]
-
+  # Gravity is the fixed -z axis (EntityData.gravity_vec_w); asset_cfg stays in the
+  # signature so existing cfgs keep working.
+  del asset_cfg
   command = cast(MotionCommand, env.command_manager.get_term(command_name))
-  motion_projected_gravity_b = quat_apply_inverse(
-    command.anchor_quat_w, asset.data.gravity_vec_w
-  )
-
-  robot_projected_gravity_b = quat_apply_inverse(
-    command.robot_anchor_quat_w, asset.data.gravity_vec_w
-  )
-
-  return (
-    motion_projected_gravity_b[:, 2] - robot_projected_gravity_b[:, 2]
-  ).abs() > threshold
+  error = kernels.anchor_tilt_error(command.robot_anchor_quat_w, command.anchor_quat_w)
+  return error > threshold
 
 
 def bad_motion_body_pos(
