@@ -6,10 +6,13 @@ from mjlab.asset_zoo.robots import (
 )
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
-from mjlab.managers.observation_manager import ObservationGroupCfg
+from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
+from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
+from mjlab.tasks.tracking import mdp
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
 from mjlab.tasks.tracking.tracking_env_cfg import make_tracking_env_cfg
+from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
 
 def unitree_g1_flat_tracking_env_cfg(
@@ -96,5 +99,72 @@ def unitree_g1_flat_tracking_env_cfg(
     motion_cmd.velocity_range = {}
 
     motion_cmd.sampling_mode = "start"
+
+  return cfg
+
+
+##
+# SuperMimic (world-model policy optimization over a motion library).
+##
+
+
+def unitree_g1_flat_tracking_supermimic_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Baseline tracking cfg changed to the SuperMimic paper's env (Tables A.1-A.3).
+
+  No pushes, no self-collision penalty, joint-limit weight -2, no end-effector
+  termination, and the clip end is a time-out (``motion_end``). Observation groups:
+  ``actor`` = 10-frame history of [joint_pos, joint_vel, base_ang_vel,
+  projected_gravity, actions] (930, flattened term-major, each term's frames oldest
+  first) and ``goal`` = 10 future reference frames (670). There is no critic group.
+  ``commands.motion.motion_file`` takes a tuple of npz paths (the clip library).
+  """
+  cfg = unitree_g1_flat_tracking_env_cfg(play=play)
+
+  cfg.events.pop("push_robot", None)
+  del cfg.rewards["self_collisions"]
+  cfg.rewards["joint_limit"].weight = -2.0
+  del cfg.terminations["ee_body_pos"]
+  cfg.terminations["motion_end"] = TerminationTermCfg(
+    func=mdp.motion_end, params={"command_name": "motion"}, time_out=True
+  )
+
+  actor_terms = cfg.observations["actor"].terms
+  cfg.observations = {
+    "actor": ObservationGroupCfg(
+      terms={
+        "joint_pos": actor_terms["joint_pos"],
+        "joint_vel": actor_terms["joint_vel"],
+        "base_ang_vel": actor_terms["base_ang_vel"],
+        "projected_gravity": ObservationTermCfg(
+          func=mdp.projected_gravity, noise=Unoise(n_min=-0.05, n_max=0.05)
+        ),
+        "actions": actor_terms["actions"],
+      },
+      enable_corruption=not play,
+      history_length=10,
+      flatten_history_dim=True,
+    ),
+    "goal": ObservationGroupCfg(
+      terms={
+        "motion_future_frames": ObservationTermCfg(
+          func=mdp.motion_future_frames_b,
+          params={"command_name": "motion", "future_frames": 10},
+        ),
+      },
+    ),
+  }
+
+  motion_cmd = cfg.commands["motion"]
+  assert isinstance(motion_cmd, MotionCommandCfg)
+  if play:
+    # Paper App. F.1 evaluation: friction 1.0, no randomization, no reset noise.
+    cfg.events.pop("base_com")
+    cfg.events.pop("encoder_bias")
+    cfg.events["foot_friction"].params["ranges"] = (1.0, 1.0)
+    motion_cmd.joint_position_range = (0.0, 0.0)
+  else:
+    motion_cmd.sampling_mode = "return"
 
   return cfg

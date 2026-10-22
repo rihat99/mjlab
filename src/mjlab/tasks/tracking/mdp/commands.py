@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
@@ -21,7 +22,7 @@ from mjlab.viewer.debug_visualizer import DebugVisualizer
 from . import kernels
 
 if TYPE_CHECKING:
-  from collections.abc import Callable
+  from collections.abc import Callable, Sequence
   from typing import Any
 
   import viser
@@ -33,30 +34,54 @@ _DESIRED_FRAME_COLORS = ((1.0, 0.5, 0.5), (0.5, 1.0, 0.5), (0.5, 0.5, 1.0))
 
 
 class MotionLoader:
+  """One or several 50 Hz reference clips, concatenated along time.
+
+  Frame indices are global over the concatenation. Clip ``c`` covers frames
+  ``[clip_start[c], clip_end[c])``; ``clip_id_of_frame`` (F,) maps a frame to its clip.
+  """
+
   def __init__(
-    self, motion_file: str, body_indexes: torch.Tensor, device: str = "cpu"
+    self,
+    motion_file: str | Sequence[str],
+    body_indexes: torch.Tensor,
+    device: str = "cpu",
   ) -> None:
-    data = np.load(motion_file)
-    self.joint_pos = torch.tensor(data["joint_pos"], dtype=torch.float32, device=device)
-    self.joint_vel = torch.tensor(data["joint_vel"], dtype=torch.float32, device=device)
-    self._body_pos_w = torch.tensor(
-      data["body_pos_w"], dtype=torch.float32, device=device
-    )
-    self._body_quat_w = torch.tensor(
-      data["body_quat_w"], dtype=torch.float32, device=device
-    )
-    self._body_lin_vel_w = torch.tensor(
-      data["body_lin_vel_w"], dtype=torch.float32, device=device
-    )
-    self._body_ang_vel_w = torch.tensor(
-      data["body_ang_vel_w"], dtype=torch.float32, device=device
-    )
+    files = [motion_file] if isinstance(motion_file, str) else list(motion_file)
+    if not files:
+      raise ValueError("MotionLoader needs at least one motion file.")
+    clips = [np.load(file) for file in files]
+    for file, clip in zip(files, clips, strict=True):
+      # One reference frame per 50 Hz env step; fps is otherwise not used.
+      if "fps" in clip and float(clip["fps"].reshape(-1)[0]) != 50.0:
+        raise ValueError(f"{file}: motions must be 50 Hz, got fps={clip['fps']}.")
+    lengths = [clip["joint_pos"].shape[0] for clip in clips]
+    if min(lengths) < 2:
+      raise ValueError("Every motion clip needs at least 2 frames.")
+
+    def load(key: str) -> torch.Tensor:
+      data = np.concatenate([clip[key] for clip in clips])
+      return torch.tensor(data, dtype=torch.float32, device=device)
+
+    self.joint_pos = load("joint_pos")
+    self.joint_vel = load("joint_vel")
+    self._body_pos_w = load("body_pos_w")
+    self._body_quat_w = load("body_quat_w")
+    self._body_lin_vel_w = load("body_lin_vel_w")
+    self._body_ang_vel_w = load("body_ang_vel_w")
     self._body_indexes = body_indexes
     self.body_pos_w = self._body_pos_w[:, self._body_indexes]
     self.body_quat_w = self._body_quat_w[:, self._body_indexes]
     self.body_lin_vel_w = self._body_lin_vel_w[:, self._body_indexes]
     self.body_ang_vel_w = self._body_ang_vel_w[:, self._body_indexes]
     self.time_step_total = self.joint_pos.shape[0]
+
+    self.clip_names = tuple(Path(file).stem for file in files)
+    clip_length = torch.tensor(lengths, dtype=torch.long, device=device)
+    self.clip_end = torch.cumsum(clip_length, dim=0)
+    self.clip_start = self.clip_end - clip_length
+    self.clip_id_of_frame = torch.repeat_interleave(
+      torch.arange(len(files), device=device), clip_length
+    )
 
 
 class MotionCommand(CommandTerm):
@@ -89,7 +114,33 @@ class MotionCommand(CommandTerm):
     )
     self.body_quat_relative_w[:, :, 0] = 1.0
 
-    self.bin_count = int(self.motion.time_step_total // (1 / env.step_dt)) + 1
+    # Bins of at most 1 s, per clip: clip c gets n_c = len_c // fps + 1 equal-width
+    # bins (the single-clip rule mjlab always used), so no bin spans two clips.
+    clip_length = self.motion.clip_end - self.motion.clip_start
+    self._clip_bin_count = torch.tensor(
+      [int(n // (1 / env.step_dt)) + 1 for n in clip_length.tolist()],
+      device=self.device,
+    )
+    self._clip_first_bin = torch.cumsum(self._clip_bin_count, 0) - self._clip_bin_count
+    self.bin_count = int(self._clip_bin_count.sum())
+    clip_id = self.motion.clip_id_of_frame
+    local_frame = (
+      torch.arange(self.motion.time_step_total, device=self.device)
+      - self.motion.clip_start[clip_id]
+    )
+    self.bin_of_frame = (
+      self._clip_first_bin[clip_id]
+      + local_frame * self._clip_bin_count[clip_id] // clip_length[clip_id]
+    )
+    bin_size = torch.bincount(self.bin_of_frame, minlength=self.bin_count)
+    self.bin_end = torch.cumsum(bin_size, 0)
+    self.bin_start = self.bin_end - bin_size
+    # "return" sampling state: return estimate G_b and past softmax weights per bin.
+    self.bin_returns = torch.zeros(self.bin_count, device=self.device)
+    self.bin_past_weights = torch.full(
+      (self.bin_count,), 1.0 / self.bin_count, device=self.device
+    )
+
     self.bin_failed_count = torch.zeros(
       self.bin_count, dtype=torch.float, device=self.device
     )
@@ -246,15 +297,80 @@ class MotionCommand(CommandTerm):
       self.joint_vel - self.robot_joint_vel, dim=-1
     )
 
+  def clip_end_of(self, frames: torch.Tensor) -> torch.Tensor:
+    """Exclusive end frame of the clip each frame belongs to: (B,) -> (B,)."""
+    return self.motion.clip_end[self.motion.clip_id_of_frame[frames]]
+
+  def bin_of(self, frames: torch.Tensor) -> torch.Tensor:
+    """Sampling bin of each frame: (B,) -> (B,)."""
+    return self.bin_of_frame[frames]
+
+  def future_frames(self, frames: torch.Tensor, num_frames: int) -> torch.Tensor:
+    """Frames ``frames + 1 .. frames + num_frames``, clamped to the clip's last frame.
+
+    (B,) -> (B, num_frames).
+    """
+    offsets = torch.arange(1, num_frames + 1, device=frames.device)
+    last = self.clip_end_of(frames) - 1
+    return torch.minimum(frames.unsqueeze(-1) + offsets, last.unsqueeze(-1))
+
+  def assign_clips_from_start(self, env_ids: torch.Tensor) -> None:
+    """Point env ``i`` at the first frame of clip ``i mod C`` (play, evaluation)."""
+    num_clips = len(self.motion.clip_names)
+    self.time_steps[env_ids] = self.motion.clip_start[env_ids % num_clips]
+
+  def bin_sampling_probabilities(self) -> torch.Tensor:
+    """Reset distribution over bins (Nb,) of ``sampling_mode="return"``.
+
+    Paper App. D.1: 0.5 uniform + 0.4 softmax(-25 G_b / G_max) + 0.1 past weights.
+    """
+    softmax = self._bin_return_softmax()
+    return 0.5 / self.bin_count + 0.4 * softmax + 0.1 * self.bin_past_weights
+
+  def update_bin_returns(self, bins: torch.Tensor, returns: torch.Tensor) -> None:
+    """EMA of the observed returns per bin; duplicate bins are averaged first.
+
+    Args:
+      bins: (M,) int64 bin indexes.
+      returns: (M,) returns observed from those bins.
+    """
+    total = torch.zeros_like(self.bin_returns).index_add_(0, bins, returns)
+    count = torch.bincount(bins, minlength=self.bin_count)
+    seen = count > 0
+    alpha = self.cfg.bin_return_alpha
+    self.bin_returns[seen] = (1 - alpha) * self.bin_returns[seen] + alpha * (
+      total[seen] / count[seen]
+    )
+
+  def update_past_weights(self) -> None:
+    """EMA of the softmax distribution; called once per training iteration."""
+    self.bin_past_weights.lerp_(self._bin_return_softmax(), self.cfg.past_weight_alpha)
+
+  def _bin_return_softmax(self) -> torch.Tensor:
+    return torch.softmax(-25.0 * self.bin_returns / self.cfg.g_max, dim=0)
+
+  def _return_sampling(self, env_ids: torch.Tensor):
+    probabilities = self.bin_sampling_probabilities()
+    bins = torch.multinomial(probabilities, len(env_ids), replacement=True)
+    start = self.bin_start[bins]
+    # Never a clip's last frame: the reset's frame advance would leave the clip.
+    stop = torch.minimum(self.bin_end[bins], self.clip_end_of(start) - 1)
+    offset = (torch.rand(len(env_ids), device=self.device) * (stop - start)).long()
+    self.time_steps[env_ids] = torch.minimum(start + offset, stop - 1)
+    self._update_sampling_metrics(probabilities)
+
+  def _update_sampling_metrics(self, sampling_probabilities: torch.Tensor) -> None:
+    H = -(sampling_probabilities * (sampling_probabilities + 1e-12).log()).sum()
+    H_norm = H / math.log(self.bin_count) if self.bin_count > 1 else 1.0
+    pmax, imax = sampling_probabilities.max(dim=0)
+    self.metrics["sampling_entropy"][:] = H_norm
+    self.metrics["sampling_top1_prob"][:] = pmax
+    self.metrics["sampling_top1_bin"][:] = imax.float() / self.bin_count
+
   def _adaptive_sampling(self, env_ids: torch.Tensor):
     episode_failed = self._env.termination_manager.terminated[env_ids]
     if torch.any(episode_failed):
-      current_bin_index = torch.clamp(
-        (self.time_steps * self.bin_count) // max(self.motion.time_step_total, 1),
-        0,
-        self.bin_count - 1,
-      )
-      fail_bins = current_bin_index[env_ids][episode_failed]
+      fail_bins = self.bin_of_frame[self.time_steps[env_ids][episode_failed]]
       self._current_bin_failed[:] = torch.bincount(fail_bins, minlength=self.bin_count)
 
     # Sample.
@@ -275,19 +391,23 @@ class MotionCommand(CommandTerm):
     sampled_bins = torch.multinomial(
       sampling_probabilities, len(env_ids), replacement=True
     )
+    clip_id = self.motion.clip_id_of_frame[self.bin_start[sampled_bins]]
+    clip_start = self.motion.clip_start[clip_id]
+    clip_length = self.motion.clip_end[clip_id] - clip_start
     self.time_steps[env_ids] = (
-      (sampled_bins + sample_uniform(0.0, 1.0, (len(env_ids),), device=self.device))
-      / self.bin_count
-      * (self.motion.time_step_total - 1)
-    ).long()
+      clip_start
+      + (
+        (
+          sampled_bins
+          - self._clip_first_bin[clip_id]
+          + sample_uniform(0.0, 1.0, (len(env_ids),), device=self.device)
+        )
+        / self._clip_bin_count[clip_id]
+        * (clip_length - 1)
+      ).long()
+    )
 
-    # Update metrics.
-    H = -(sampling_probabilities * (sampling_probabilities + 1e-12).log()).sum()
-    H_norm = H / math.log(self.bin_count) if self.bin_count > 1 else 1.0
-    pmax, imax = sampling_probabilities.max(dim=0)
-    self.metrics["sampling_entropy"][:] = H_norm
-    self.metrics["sampling_top1_prob"][:] = pmax
-    self.metrics["sampling_top1_bin"][:] = imax.float() / self.bin_count
+    self._update_sampling_metrics(sampling_probabilities)
 
   def _uniform_sampling(self, env_ids: torch.Tensor):
     self.time_steps[env_ids] = torch.randint(
@@ -318,9 +438,11 @@ class MotionCommand(CommandTerm):
 
   def _resample_command(self, env_ids: torch.Tensor):
     if self.cfg.sampling_mode == "start":
-      self.time_steps[env_ids] = 0
+      self.assign_clips_from_start(env_ids)
     elif self.cfg.sampling_mode == "uniform":
       self._uniform_sampling(env_ids)
+    elif self.cfg.sampling_mode == "return":
+      self._return_sampling(env_ids)
     else:
       assert self.cfg.sampling_mode == "adaptive"
       self._adaptive_sampling(env_ids)
@@ -400,11 +522,12 @@ class MotionCommand(CommandTerm):
     return extras
 
   def _update_command(self, env_ids: torch.Tensor | None = None):
+    clip_end = self.clip_end_of(self.time_steps)
     if env_ids is None:
       self.time_steps += 1
     else:
       self.time_steps[env_ids] += 1
-    wrap_ids = torch.where(self.time_steps >= self.motion.time_step_total)[0]
+    wrap_ids = torch.where(self.time_steps >= clip_end)[0]
     if wrap_ids.numel() > 0:
       self._resample_command(wrap_ids)
 
@@ -592,7 +715,10 @@ class MotionCommand(CommandTerm):
 
 @dataclass(kw_only=True)
 class MotionCommandCfg(CommandTermCfg):
-  motion_file: str
+  # tuple first: with mjlab's tyro flags a single path still parses as a str and
+  # "('a.npz', 'b.npz')" as a tuple (the other order parses both as a str).
+  motion_file: tuple[str, ...] | str
+  """One npz path, or several concatenated into a motion library."""
   anchor_body_name: str
   body_names: tuple[str, ...]
   entity_name: str
@@ -603,7 +729,13 @@ class MotionCommandCfg(CommandTermCfg):
   adaptive_lambda: float = 0.8
   adaptive_uniform_ratio: float = 0.1
   adaptive_alpha: float = 0.001
-  sampling_mode: Literal["adaptive", "uniform", "start"] = "adaptive"
+  sampling_mode: Literal["adaptive", "uniform", "start", "return"] = "adaptive"
+  g_max: float = 10.0
+  """Return sampling: largest attainable discounted return, 0.1 / (1 - 0.99)."""
+  bin_return_alpha: float = 0.1
+  """Return sampling: EMA factor of the per-bin return estimates."""
+  past_weight_alpha: float = 1e-4
+  """Return sampling: EMA factor of the past softmax weights, per iteration."""
 
   @dataclass
   class VizCfg:

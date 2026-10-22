@@ -296,3 +296,37 @@ def proprio_observation(
   projected_gravity = quat_apply_inverse(root_quat_w, gravity_w)
   joint_pos = q + encoder_bias - default_q
   return torch.cat([joint_pos, qd, root_ang_vel_b, projected_gravity, a_prev], dim=-1)
+
+
+def future_frames_goal(
+  ref_anchor_pos_w: torch.Tensor,
+  ref_anchor_quat_w: torch.Tensor,
+  ref_joint_pos: torch.Tensor,
+  ref_joint_vel: torch.Tensor,
+  anchor_pos_w: torch.Tensor,
+  anchor_quat_w: torch.Tensor,
+) -> torch.Tensor:
+  """Goal from K reference frames, each anchor pose seen from the robot anchor.
+
+  Per frame: reference anchor position (3) and orientation (6) in the robot anchor
+  frame (``pose_in_frame``), then reference joint positions (J) and velocities (J).
+  Frames are concatenated in order (k-major).
+
+  Args:
+    ref_anchor_pos_w: (B, K, 3) reference anchor positions.
+    ref_anchor_quat_w: (B, K, 4) reference anchor orientations.
+    ref_joint_pos: (B, K, J) reference joint positions.
+    ref_joint_vel: (B, K, J) reference joint velocities.
+    anchor_pos_w: (B, 3) robot anchor position, same frame as the reference.
+    anchor_quat_w: (B, 4) robot anchor orientation.
+
+  Returns:
+    (B, K * (9 + 2 J)); 670 on the G1 with K = 10.
+  """
+  pos_b, ori_b = pose_in_frame(
+    ref_anchor_pos_w,
+    ref_anchor_quat_w,
+    anchor_pos_w.unsqueeze(-2).expand_as(ref_anchor_pos_w),
+    anchor_quat_w.unsqueeze(-2).expand_as(ref_anchor_quat_w),
+  )
+  return torch.cat([pos_b, ori_b, ref_joint_pos, ref_joint_vel], dim=-1).flatten(-2)

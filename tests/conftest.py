@@ -211,21 +211,24 @@ def falling_box_xml() -> str:
   """
 
 
-def write_g1_motion_npz(path: Path, num_frames: int = 100) -> Path:
+def write_g1_motion_npz(
+  path: Path, num_frames: int = 100, amplitude: float = 0.2, speed: float = 0.3
+) -> Path:
   """Write a 50 Hz G1 reference motion for tracking tests and return its path.
 
-  Knees-bent keyframe walking forward at 0.3 m/s with a 0.5 Hz sinusoid on every
-  joint. Body poses and body-origin velocities come from MuJoCo, in the layout of
-  ``scripts/csv_to_npz.py`` (all robot bodies, world frame).
+  Knees-bent keyframe walking forward at ``speed`` m/s with a 0.5 Hz sinusoid of
+  ``amplitude`` rad on every joint (both 0: standing still). Body poses and
+  body-origin velocities come from MuJoCo, in the layout of ``scripts/csv_to_npz.py``
+  (all robot bodies, world frame).
   """
   model = Entity(get_g1_robot_cfg()).compile()
   data = mujoco.MjData(model)
   key_qpos = model.key("init_state").qpos
   time = np.arange(num_frames)[:, None] / 50.0
   phase = 2 * np.pi * 0.5 * time + np.linspace(0.0, np.pi, model.nq - 7)
-  joint_pos = key_qpos[7:] + 0.2 * np.sin(phase)
-  joint_vel = 0.2 * 2 * np.pi * 0.5 * np.cos(phase)
-  root_vel = np.array([0.3, 0.0, 0.0])
+  joint_pos = key_qpos[7:] + amplitude * np.sin(phase)
+  joint_vel = amplitude * 2 * np.pi * 0.5 * np.cos(phase)
+  root_vel = np.array([speed, 0.0, 0.0])
   bodies = range(1, model.nbody)
   arrays = {k: [] for k in ("pos", "quat", "lin_vel", "ang_vel")}
   velocity = np.zeros(6)

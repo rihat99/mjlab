@@ -105,6 +105,7 @@ def _make_motion_command_stub(time_steps, total, sampling_mode="uniform"):
   cmd.time_steps = torch.tensor(time_steps, dtype=torch.long)
   cmd.motion = Mock()
   cmd.motion.time_step_total = total
+  cmd.clip_end_of = lambda frames: torch.full_like(frames, total)
   cmd.cfg = Mock()
   cmd.cfg.sampling_mode = sampling_mode
   cmd.cfg.adaptive_alpha = 0.5
