@@ -34,3 +34,17 @@ register_mjlab_task(
   rl_cfg=unitree_g1_tracking_supermimic_runner_cfg(),
   runner_cls=SuperMimicRunner,
 )
+
+# The contact physics of the 14k torso-anchor runs: self-collision on, friction
+# randomised on the feet only.
+register_mjlab_task(
+  task_id="Mjlab-Tracking-Flat-Unitree-G1-SuperMimic-SelfCollision",
+  env_cfg=unitree_g1_flat_tracking_supermimic_env_cfg(
+    self_collision=True, friction_all_geoms=False
+  ),
+  play_env_cfg=unitree_g1_flat_tracking_supermimic_env_cfg(
+    play=True, self_collision=True, friction_all_geoms=False
+  ),
+  rl_cfg=unitree_g1_tracking_supermimic_runner_cfg(),
+  runner_cls=SuperMimicRunner,
+)

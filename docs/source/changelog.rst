@@ -24,6 +24,12 @@ Added
   Imagination uses the task's analytic termination by default
   (``policy.analytic_termination``); the learned termination head is kept for
   comparison.
+- The SuperMimic task uses the contact physics of Uni-SuperMimic: no robot
+  self-collision, and the startup friction randomisation on every robot collision
+  geom with the ground at 0.3 in training (``self_collision`` and
+  ``friction_all_geoms`` of ``unitree_g1_flat_tracking_supermimic_env_cfg``).
+  ``Mjlab-Tracking-Flat-Unitree-G1-SuperMimic-SelfCollision`` keeps self-collision
+  and the foot-only friction randomisation.
 - Added a ``cu126`` extra (``uv sync --extra cu126``) that installs torch built for
   CUDA 12.6, for machines whose NVIDIA driver is older than 580. It does not include
   kernels for Blackwell GPUs.

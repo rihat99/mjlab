@@ -4,6 +4,7 @@ from mjlab.asset_zoo.robots import (
   G1_ACTION_SCALE,
   get_g1_robot_cfg,
 )
+from mjlab.asset_zoo.robots.unitree_g1.g1_constants import FULL_COLLISION_WITHOUT_SELF
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
@@ -15,6 +16,7 @@ from mjlab.tasks.tracking.mdp import MotionCommandCfg
 from mjlab.tasks.tracking.supermimic.recorder import TerminalStateRecorder
 from mjlab.tasks.tracking.tracking_env_cfg import make_tracking_env_cfg
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
+from mjlab.utils.spec_config import GeomCfg
 
 
 def unitree_g1_flat_tracking_env_cfg(
@@ -112,6 +114,8 @@ def unitree_g1_flat_tracking_env_cfg(
 
 def unitree_g1_flat_tracking_supermimic_env_cfg(
   play: bool = False,
+  self_collision: bool = False,
+  friction_all_geoms: bool = True,
 ) -> ManagerBasedRlEnvCfg:
   """Baseline tracking cfg changed to the SuperMimic paper's env (Tables A.1-A.3).
 
@@ -123,8 +127,32 @@ def unitree_g1_flat_tracking_supermimic_env_cfg(
   the next reward is scored against. There is no critic group.
   ``commands.motion.motion_file`` takes a tuple of npz paths (the clip library).
   The ``terminal_state`` recorder keeps the pre-reset state of auto-reset envs.
+
+  Contact physics as in Uni-SuperMimic and supermimic_vibed (the paper leaves it
+  open): ``self_collision=False`` keeps robot-ground contacts only.
+  ``friction_all_geoms=True`` randomises the friction of every robot collision geom
+  (one value per env) instead of the feet only, and lowers the ground to 0.3 in
+  training: MuJoCo uses the larger friction of two equal-priority geoms, so with
+  the default ground of 1.0 only the feet (priority 1) would see the sampled value.
+  The play cfg keeps the ground at 1.0 and sets every randomised geom to 1.0.
+  ``self_collision=True, friction_all_geoms=False`` is the physics of the 14k
+  torso-anchor runs.
   """
   cfg = unitree_g1_flat_tracking_env_cfg(play=play)
+  if not self_collision:
+    cfg.scene.entities["robot"].collisions = (FULL_COLLISION_WITHOUT_SELF,)
+    # Its only reader, the self_collisions reward, is removed below.
+    cfg.scene.sensors = tuple(
+      s for s in cfg.scene.sensors if s.name != "self_collision"
+    )
+  if friction_all_geoms:
+    # Keeps its name: the model interface reads the friction context from it.
+    cfg.events["foot_friction"].params["asset_cfg"].geom_names = r".*_collision$"
+    if not play:
+      assert cfg.scene.terrain is not None
+      cfg.scene.terrain.geoms = (
+        GeomCfg(geom_names_expr=("terrain",), friction=(0.3,)),
+      )
   cfg.recorders["terminal_state"] = RecorderTermCfg(
     func=TerminalStateRecorder, params={"entity_name": "robot"}
   )

@@ -141,9 +141,15 @@ GPU=0 nohup tools/eval_watch.sh $DATA/runs/lafan_supermimic/<run> $TRAIN_PID \
 ```
 
 Analytic termination is the default; the learned-head arm adds
-`--agent.policy.analytic-termination False` after `--`. Anything after `--` goes to
-mjlab's `train` unchanged; `--clips a,b` trains on
-a subset; `--print-cmd` only prints the command.
+`--agent.policy.analytic-termination False` after `--`. A run of the
+`-SelfCollision` task (see Configuration pointers) passes
+`--task Mjlab-Tracking-Flat-Unitree-G1-SuperMimic-SelfCollision` to `train_library.py`
+and `TASK=Mjlab-Tracking-Flat-Unitree-G1-SuperMimic-SelfCollision` to `eval_watch.sh`,
+so that its evaluation uses the same physics. The two retrain arms of `task/retrain`
+both use analytic termination and differ only in the contact physics: `uni_env` (the
+default task) and `pelvis_analytic` (the `-SelfCollision` task). Anything after `--`
+goes to mjlab's `train` unchanged; `--clips a,b` trains on a subset; `--print-cmd`
+only prints the command.
 
 Evaluate a checkpoint (default: the newest run and its last checkpoint) on its
 training library; writes `eval_library_model_<it>.json` next to it:
@@ -207,8 +213,10 @@ learned termination head). sim = training normalised return in the simulator;
 imagined = imagined reward normalised by its maximum; eval = library evaluation of
 the checkpoint, normalised by clip length ("clip", penalises an early fall) and by
 survived steps ("survived"). These runs used BeyondMimic's ``torso_link`` as the
-anchor body for termination, anchor rewards and relative body targets; the config
-now uses the paper's root (``pelvis``), so later runs are not directly comparable.
+anchor body for termination, anchor rewards and relative body targets, and the
+contact physics of the `-SelfCollision` task; the config now uses the paper's root
+(``pelvis``) and the Uni-SuperMimic contact physics, so later runs are not directly
+comparable.
 
 | iteration | sim | imagined | eval clip | eval survived | failed clips |
 |---|---|---|---|---|---|
@@ -235,6 +243,16 @@ the compile bug, speed, comparison with the colleague's run, local task notes ou
   hyperparameter (Tables A.1–A.5); fields marked "(choice)" are not given in the
   paper. Override any field from the command line after `--`, e.g.
   `--agent.policy.horizon 16`.
+- Contact physics (`unitree_g1_flat_tracking_supermimic_env_cfg` in
+  `src/mjlab/tasks/tracking/config/g1/env_cfgs.py`), as in Uni-SuperMimic and the
+  colleague's implementation (the paper does not say): `self_collision=False` (no
+  robot self-contacts) and `friction_all_geoms=True` (the startup friction U(0.3, 1.2),
+  one value per env, on all 33 robot collision geoms instead of the 14 foot geoms, and
+  the ground at 0.3 in training, because MuJoCo takes the larger friction of two
+  equal-priority geoms and only the feet have priority 1). The play cfg sets every
+  robot geom and the ground to 1.0. The task
+  `Mjlab-Tracking-Flat-Unitree-G1-SuperMimic-SelfCollision` keeps the previous
+  physics (`self_collision=True, friction_all_geoms=False`).
 - `PolicyCfg.analytic_termination` (default on): imagination uses the task's analytic
   soft termination instead of the learned head (the head keeps training, for
   logging). The learned head is kept for comparison only.
