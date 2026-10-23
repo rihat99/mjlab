@@ -66,10 +66,19 @@ def test_motion_loader_concatenates_clips(motion_files: tuple[str, ...]) -> None
   for c, file in enumerate(motion_files):
     data = np.load(file)
     frames = slice(int(loader.clip_start[c]), int(loader.clip_end[c]))
-    np.testing.assert_array_equal(loader.joint_vel[frames].numpy(), data["joint_vel"])
+    # Stored in float16, except the body positions.
     np.testing.assert_array_equal(
-      loader.body_quat_w[frames].numpy(), data["body_quat_w"]
+      loader.joint_vel[frames].numpy(), data["joint_vel"].astype(np.float16)
     )
+    np.testing.assert_array_equal(
+      loader.body_quat_w[frames].numpy(), data["body_quat_w"].astype(np.float16)
+    )
+    np.testing.assert_array_equal(loader.body_pos_w[frames].numpy(), data["body_pos_w"])
+  # Only the tracked bodies are kept, in the given order.
+  subset = MotionLoader(motion_files[0], torch.tensor([3, 0, 7]))
+  np.testing.assert_array_equal(
+    subset.body_pos_w.numpy(), np.load(motion_files[0])["body_pos_w"][:, [3, 0, 7]]
+  )
   single = MotionLoader(motion_files[1], body_indexes)
   assert single.clip_end.tolist() == [CLIP_LENGTHS[1]]
   assert single.time_step_total == CLIP_LENGTHS[1]

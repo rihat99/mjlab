@@ -331,9 +331,9 @@ class TrackingModelInterface:
     motion = self._command.motion
     return kernels.future_frames_goal(
       motion.body_pos_w[frames, self._anchor],
-      motion.body_quat_w[frames, self._anchor],
-      motion.joint_pos[frames],
-      motion.joint_vel[frames],
+      motion.body_quat_w[frames, self._anchor].float(),
+      motion.joint_pos[frames].float(),
+      motion.joint_vel[frames].float(),
       anchor_pos,
       anchor_quat,
     )
@@ -357,7 +357,7 @@ class TrackingModelInterface:
     )
     motion = self._command.motion
     ref_pos = motion.body_pos_w[frame]
-    ref_quat = motion.body_quat_w[frame]
+    ref_quat = motion.body_quat_w[frame].float()
     i = self._anchor
     pos_delta, quat_delta = kernels.anchor_frame(
       body_pos[:, i], body_quat[:, i], ref_pos[:, i], ref_quat[:, i]
@@ -377,11 +377,11 @@ class TrackingModelInterface:
         value = kernels.body_ori_reward(body_quat, target_quat, params["std"])
       elif func is mdp.motion_global_body_linear_velocity_error_exp:
         value = kernels.body_lin_vel_reward(
-          body_lin_vel, motion.body_lin_vel_w[frame], params["std"]
+          body_lin_vel, motion.body_lin_vel_w[frame].float(), params["std"]
         )
       elif func is mdp.motion_global_body_angular_velocity_error_exp:
         value = kernels.body_ang_vel_reward(
-          body_ang_vel, motion.body_ang_vel_w[frame], params["std"]
+          body_ang_vel, motion.body_ang_vel_w[frame].float(), params["std"]
         )
       elif func is mdp.action_rate_l2:
         value = kernels.action_rate_l2(a, a_prev)
@@ -413,7 +413,7 @@ class TrackingModelInterface:
       anchor_pos,
       anchor_quat,
       motion.body_pos_w[frame, self._anchor],
-      motion.body_quat_w[frame, self._anchor],
+      motion.body_quat_w[frame, self._anchor].float(),
       z_thresh=self._z_threshold,
       tilt_thresh=self._tilt_threshold,
     )
@@ -436,7 +436,7 @@ class TrackingModelInterface:
       anchor_pos,
       anchor_quat,
       motion.body_pos_w[frame, self._anchor],
-      motion.body_quat_w[frame, self._anchor],
+      motion.body_quat_w[frame, self._anchor].float(),
       z_thresh=self._z_threshold,
       tilt_thresh=self._tilt_threshold,
     )

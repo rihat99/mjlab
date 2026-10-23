@@ -31,6 +31,15 @@ if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
 
 _DESIRED_FRAME_COLORS = ((1.0, 0.5, 0.5), (0.5, 1.0, 0.5), (0.5, 0.5, 1.0))
+# MotionLoader storage per npz key.
+_STORAGE_DTYPES = {
+  "joint_pos": np.float16,
+  "joint_vel": np.float16,
+  "body_pos_w": np.float32,
+  "body_quat_w": np.float16,
+  "body_lin_vel_w": np.float16,
+  "body_ang_vel_w": np.float16,
+}
 
 
 class MotionLoader:
@@ -38,6 +47,11 @@ class MotionLoader:
 
   Frame indices are global over the concatenation. Clip ``c`` covers frames
   ``[clip_start[c], clip_end[c])``; ``clip_id_of_frame`` (F,) maps a frame to its clip.
+
+  Only the tracked bodies (``body_indexes``) are kept. To fit large libraries on the
+  GPU, everything but the body positions is stored in float16 (positions stay float32:
+  float16 spacing is 8 mm at 8-16 m from the origin); readers cast the rows they
+  gather to float32 (``.float()``).
   """
 
   def __init__(
@@ -49,30 +63,30 @@ class MotionLoader:
     files = [motion_file] if isinstance(motion_file, str) else list(motion_file)
     if not files:
       raise ValueError("MotionLoader needs at least one motion file.")
-    clips = [np.load(file) for file in files]
-    for file, clip in zip(files, clips, strict=True):
-      # One reference frame per 50 Hz env step; fps is otherwise not used.
-      if "fps" in clip and float(clip["fps"].reshape(-1)[0]) != 50.0:
-        raise ValueError(f"{file}: motions must be 50 Hz, got fps={clip['fps']}.")
-    lengths = [clip["joint_pos"].shape[0] for clip in clips]
+    bodies = body_indexes.cpu().numpy()
+    parts: dict[str, list[np.ndarray]] = {key: [] for key in _STORAGE_DTYPES}
+    lengths = []
+    for file in files:
+      with np.load(file) as clip:
+        # One reference frame per 50 Hz env step; fps is otherwise not used.
+        if "fps" in clip and float(clip["fps"].reshape(-1)[0]) != 50.0:
+          raise ValueError(f"{file}: motions must be 50 Hz, got fps={clip['fps']}.")
+        lengths.append(clip["joint_pos"].shape[0])
+        for key, dtype in _STORAGE_DTYPES.items():
+          data = clip[key][:, bodies] if key.startswith("body_") else clip[key]
+          parts[key].append(data.astype(dtype, copy=False))
     if min(lengths) < 2:
       raise ValueError("Every motion clip needs at least 2 frames.")
 
     def load(key: str) -> torch.Tensor:
-      data = np.concatenate([clip[key] for clip in clips])
-      return torch.tensor(data, dtype=torch.float32, device=device)
+      return torch.from_numpy(np.concatenate(parts.pop(key))).to(device)
 
     self.joint_pos = load("joint_pos")
     self.joint_vel = load("joint_vel")
-    self._body_pos_w = load("body_pos_w")
-    self._body_quat_w = load("body_quat_w")
-    self._body_lin_vel_w = load("body_lin_vel_w")
-    self._body_ang_vel_w = load("body_ang_vel_w")
-    self._body_indexes = body_indexes
-    self.body_pos_w = self._body_pos_w[:, self._body_indexes]
-    self.body_quat_w = self._body_quat_w[:, self._body_indexes]
-    self.body_lin_vel_w = self._body_lin_vel_w[:, self._body_indexes]
-    self.body_ang_vel_w = self._body_ang_vel_w[:, self._body_indexes]
+    self.body_pos_w = load("body_pos_w")
+    self.body_quat_w = load("body_quat_w")
+    self.body_lin_vel_w = load("body_lin_vel_w")
+    self.body_ang_vel_w = load("body_ang_vel_w")
     self.time_step_total = self.joint_pos.shape[0]
 
     self.clip_names = tuple(Path(file).stem for file in files)
@@ -179,11 +193,11 @@ class MotionCommand(CommandTerm):
 
   @property
   def joint_pos(self) -> torch.Tensor:
-    return self.motion.joint_pos[self.time_steps]
+    return self.motion.joint_pos[self.time_steps].float()
 
   @property
   def joint_vel(self) -> torch.Tensor:
-    return self.motion.joint_vel[self.time_steps]
+    return self.motion.joint_vel[self.time_steps].float()
 
   @property
   def body_pos_w(self) -> torch.Tensor:
@@ -193,15 +207,15 @@ class MotionCommand(CommandTerm):
 
   @property
   def body_quat_w(self) -> torch.Tensor:
-    return self.motion.body_quat_w[self.time_steps]
+    return self.motion.body_quat_w[self.time_steps].float()
 
   @property
   def body_lin_vel_w(self) -> torch.Tensor:
-    return self.motion.body_lin_vel_w[self.time_steps]
+    return self.motion.body_lin_vel_w[self.time_steps].float()
 
   @property
   def body_ang_vel_w(self) -> torch.Tensor:
-    return self.motion.body_ang_vel_w[self.time_steps]
+    return self.motion.body_ang_vel_w[self.time_steps].float()
 
   @property
   def anchor_pos_w(self) -> torch.Tensor:
@@ -212,15 +226,21 @@ class MotionCommand(CommandTerm):
 
   @property
   def anchor_quat_w(self) -> torch.Tensor:
-    return self.motion.body_quat_w[self.time_steps, self.motion_anchor_body_index]
+    return self.motion.body_quat_w[
+      self.time_steps, self.motion_anchor_body_index
+    ].float()
 
   @property
   def anchor_lin_vel_w(self) -> torch.Tensor:
-    return self.motion.body_lin_vel_w[self.time_steps, self.motion_anchor_body_index]
+    return self.motion.body_lin_vel_w[
+      self.time_steps, self.motion_anchor_body_index
+    ].float()
 
   @property
   def anchor_ang_vel_w(self) -> torch.Tensor:
-    return self.motion.body_ang_vel_w[self.time_steps, self.motion_anchor_body_index]
+    return self.motion.body_ang_vel_w[
+      self.time_steps, self.motion_anchor_body_index
+    ].float()
 
   @property
   def robot_joint_pos(self) -> torch.Tensor:
@@ -433,6 +453,8 @@ class MotionCommand(CommandTerm):
     joint_pos = torch.clip(joint_pos, soft_limits[:, :, 0], soft_limits[:, :, 1])
     self.robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
 
+    # The library's float16 quaternions are unit only to ~1e-3; qpos needs unit norm.
+    root_ori = root_ori / torch.linalg.norm(root_ori, dim=-1, keepdim=True)
     root_state = torch.cat([root_pos, root_ori, root_lin_vel, root_ang_vel], dim=-1)
     self.robot.write_root_state_to_sim(root_state, env_ids=env_ids)
     self.robot.reset(env_ids=env_ids)

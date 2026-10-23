@@ -77,9 +77,9 @@ def motion_future_frames_b(
   anchor = command.motion_anchor_body_index
   return kernels.future_frames_goal(
     command.motion.body_pos_w[frames, anchor],
-    command.motion.body_quat_w[frames, anchor],
-    command.motion.joint_pos[frames],
-    command.motion.joint_vel[frames],
+    command.motion.body_quat_w[frames, anchor].float(),
+    command.motion.joint_pos[frames].float(),
+    command.motion.joint_vel[frames].float(),
     command.robot_anchor_pos_w - env.scene.env_origins,
     command.robot_anchor_quat_w,
   )
