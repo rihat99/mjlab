@@ -289,7 +289,8 @@ iteration on an idle RTX PRO 6000 (paper: 0.11 s on an H100). The current code t
 run's log; 0.32 s with `--agent.precision.autocast none`): the objective's reward and
 termination are compiled, the motion library is static for the CUDA graphs, host
 syncs are gone from the world-model steps and the env step, and the world-model fit
-and the policy update run in fp16 (see `PrecisionCfg` below).
+and the policy update run in fp16 (see `PrecisionCfg` below; its effect on the
+policy's quality at 14k is not yet measured).
 
 Runs: `$DATA/runs/lafan_supermimic/2026-10-23_00-33-44_final_learnedhead/` and
 `2026-10-23_00-33-45_final_analyticterm/`. Detailed report (curves, per-clip table,
@@ -357,18 +358,31 @@ fails 0.1 / 0.8 / 2.5 per pass. Both runs take 0.40 s per iteration (median over
   and termination are compiled each on its own, which keeps the eager gradient.
   `--agent.precision.compile False` runs everything eagerly.
   `tools/check_policy_grad.py` (4-6 minutes on one GPU) compares the compiled
-  learner's policy and world-model gradients with the eager learner's on the 14k
+  learner's policy and world-model gradients with the eager learner's on a
   checkpoint and fails if the whole-objective compile would no longer be caught
-  (mean cosine 0.70–0.76 for that build, 0.998 or more for the TF32 and fp16 builds).
+  (mean cosine 0.70–0.77 for that build). Its cosines are noisy: the 32-step imagined
+  rollouts amplify TF32 rounding, so over all runs so far the 6-trial means of the
+  TF32 build range 0.981–0.9999 (single trials down to 0.90 on the uni_env
+  checkpoint) and of the fp16 build 0.914–0.9996 (single trials down to 0.50); the
+  0.995 / 0.99 bars then fail on a correct build. With `--no-tf32` (fp32 matmuls
+  everywhere) the compiled build matches eager at 0.999999 (every trial 0.999996 or
+  more). `tools/check_reward_grad.py` (about 5 minutes) is the tight check: compiled
+  vs eager reward, reward terms and termination on identical inputs, values and input
+  gradients within 2e-6 relative (the learned head under fp16: 2e-3).
 - `PrecisionCfg.autocast` (default `"fp16"`): the world-model loss, the imagined steps
   and the policy objective run under fp16 autocast, each backward pass with its own
-  dynamic gradient scaler (scales logged as `Metrics/*_grad_scale`; an overflow skips
-  the step and counts it in `Metrics/*_skipped_steps`). Collection and the critic stay
-  fp32. Policy-gradient cosine to the eager fp32 gradient 0.998–0.9996 (TF32 compiled
-  0.9998–0.9999). Over 1500 iterations the curves overlap the fp32 run's (sim return
-  0.511 vs 0.512 at 1500); the world-model scaler skipped 4 of 15,000 steps, each when
-  its periodic growth (x2 after 2000 clean steps) overflowed. Not yet compared over a
-  full 14k run; `"none"` restores fp32 with TF32 matmuls.
+  dynamic gradient scaler (scales logged as `Metrics/*_grad_scale`, kept at 2^10 or
+  more; an overflow skips the step and counts it in `Metrics/*_skipped_steps`; a log
+  row with a scale below 2^12 or more than 0.5 % skipped steps prints a warning).
+  Collection and the critic stay fp32. Unlike TF32, which rounds only the matmul
+  inputs, fp16 rounds every Linear output and activation to fp16. Policy-gradient
+  cosine to the eager gradient (see `tools/check_policy_grad.py` above for the noise):
+  6-trial means 0.9937–0.9996 on the 14k learned-head checkpoint (TF32 compiled
+  0.99736–0.9999), 0.914–0.9993 on the uni_env checkpoint, 0.980 against an fp32
+  (no TF32) reference. Over 1500 iterations the curves overlap the fp32 run's (sim
+  return 0.511 vs 0.512 at 1500); the world-model scaler skipped 4 of 15,000 steps as
+  its overflow threshold fell during training (harmless). The effect on quality over
+  a full 14k run is not yet measured; `"none"` restores fp32 with TF32 matmuls.
 
 ## Known limitations and open items
 

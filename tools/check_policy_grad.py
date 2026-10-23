@@ -98,6 +98,12 @@ def main() -> int:
     default="cfg",
     help="policy.analytic_termination for every learner (cfg: the task default)",
   )
+  parser.add_argument(
+    "--no-tf32",
+    action="store_true",
+    help="fp32 matmuls for every learner: compiled and eager then differ only in "
+    "summation order, far less than TF32 rounding, which the rollouts amplify",
+  )
   parser.add_argument("--min-cosine", type=float, default=0.995)
   parser.add_argument("--min-cosine-fp16", type=float, default=0.99)
   parser.add_argument("--out", type=Path, default=None, help="JSON of all trials")
@@ -119,6 +125,7 @@ def main() -> int:
     agent_cfg.policy.analytic_termination = args.analytic_termination == "true"
   agent_cfg.precision.compile = False
   agent_cfg.precision.autocast = "none"
+  agent_cfg.precision.tf32 = not args.no_tf32
   env = RslRlVecEnvWrapper(
     ManagerBasedRlEnv(cfg=env_cfg, device=device), clip_actions=agent_cfg.clip_actions
   )
@@ -139,7 +146,8 @@ def main() -> int:
   log(
     f"{len(motions)} clips, {args.num_envs} envs, anchor {args.anchor_body}, "
     "analytic termination "
-    f"{runner.policy_cfg.analytic_termination}, replay filled in "
+    f"{runner.policy_cfg.analytic_termination}, TF32 {not args.no_tf32}, replay "
+    "filled in "
     f"{time.time() - started:.0f} s"
   )
 

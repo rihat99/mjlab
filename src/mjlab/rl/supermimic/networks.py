@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 from rsl_rl.modules import MLP, EmpiricalNormalization
 from torch import nn
+from torch.distributed import distributed_c10d
 
 from mjlab.rl.supermimic.config import PolicyCfg
 
@@ -96,6 +97,8 @@ def _update_in_place(normalizer: EmpiricalNormalization, x: torch.Tensor) -> Non
   from the host, which waits for the GPU)."""
   if not normalizer.training:
     return
+  # rsl_rl all-reduces the batch statistics across processes; this does not.
+  assert not distributed_c10d.is_initialized(), "multi-GPU is not supported"
   count = normalizer.get_buffer("count")
   mean = normalizer.get_buffer("_mean")
   var = normalizer.get_buffer("_var")

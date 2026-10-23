@@ -35,6 +35,10 @@ _ALL_PARTS = {
   "iteration": True,
   "sampler": True,
 }
+# A log window warns when a gradient scale falls below this (the floor is
+# algorithm.MIN_GRAD_SCALE) or more than SKIP_ALERT_FRACTION of its steps were skipped.
+GRAD_SCALE_ALERT = 2.0**12
+SKIP_ALERT_FRACTION = 0.005
 
 
 def sim_steps_at(iteration: int, steps_per_iteration: float) -> int:
@@ -374,6 +378,10 @@ class SuperMimicRunner:
       "episode_length_sum": zero.long(),
       "episodes": 0,
       "terminated": zero.long(),
+      "skipped_before": (
+        self.alg.skipped_world_model_steps,
+        self.alg.skipped_policy_steps,
+      ),
     }
 
   def _accumulate(
@@ -422,12 +430,31 @@ class SuperMimicRunner:
         max_step_reward * length_sum
       )
       scalars["Train/termination_rate"] = float(stats["terminated"]) / stats["episodes"]
-    for name, scaler in (
-      ("world_model", self.alg.world_model_scaler),
-      ("policy", self.alg.policy_scaler),
+    counts = stats["metric_counts"]
+    window_steps = (
+      counts.get("world_model_state", 0) * self.world_model_cfg.batches_per_update,
+      counts.get("policy", 0),
+    )
+    skipped_now = (self.alg.skipped_world_model_steps, self.alg.skipped_policy_steps)
+    for name, scaler, steps, now, before in zip(
+      ("world_model", "policy"),
+      (self.alg.world_model_scaler, self.alg.policy_scaler),
+      window_steps,
+      skipped_now,
+      stats["skipped_before"],
+      strict=True,
     ):
-      if scaler.is_enabled():
-        scalars[f"Metrics/{name}_grad_scale"] = scaler.get_scale()
+      scale = scaler.get_scale() if scaler.is_enabled() else None
+      if scale is not None:
+        scalars[f"Metrics/{name}_grad_scale"] = scale
+      skipped = now - before
+      if (scale is not None and scale < GRAD_SCALE_ALERT) or (
+        skipped > SKIP_ALERT_FRACTION * steps
+      ):
+        print(
+          f"[WARNING] iteration {it}: {name} gradient scale {scale}, {skipped} of "
+          f"{steps} steps skipped since the last log row"
+        )
     for key, value in self.interface.sampler_log().items():
       scalars[f"Metrics/sampler_{key}"] = value
     names = ("sim", "world_model", "policy", "critic")

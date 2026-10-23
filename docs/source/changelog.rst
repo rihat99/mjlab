@@ -46,8 +46,14 @@ Changed
   size), and host syncs are gone from the world-model steps and four places of the
   env step. Then 0.32 to 0.24 s: the world-model fit and the policy update run under
   fp16 autocast with a gradient scaler each (``precision.autocast``, default
-  ``"fp16"``; ``"none"`` keeps fp32 with TF32). ``tools/check_policy_grad.py``
-  compares the compiled learner's gradients with the eager learner's on a checkpoint.
+  ``"fp16"``; ``"none"`` keeps fp32 with TF32). fp16 rounds every Linear output and
+  activation, not only the matmul inputs as TF32 does; its effect on quality over a
+  full run is not yet measured. The gradient scales are kept at 2^10 or more and the
+  runner warns when a scale falls below 2^12 or more than 0.5 % of a log window's
+  steps are skipped. ``tools/check_policy_grad.py`` compares the compiled learner's
+  gradients with the eager learner's on a checkpoint (noisy under TF32, policy cosine
+  means 0.98–0.9999; ``--no-tf32``: 0.999999), ``tools/check_reward_grad.py`` the
+  compiled reward and termination with the eager ones (within 2e-6).
 - The tracking ``MotionLoader`` keeps only the tracked bodies and stores joints,
   body quaternions and body velocities in float16 (body positions in float32), so
   that a 47 M-frame library fits on one GPU (25 GiB); ``motion_file`` also takes a

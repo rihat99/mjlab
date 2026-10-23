@@ -81,6 +81,20 @@ def _step_unless(optimizer: torch.optim.Optimizer, skip: torch.Tensor) -> None:
     optimizer.step()
 
 
+# Floor of the gradient scalers' scale. Every non-finite step halves the scale; after
+# a burst of them, small fp16 gradients would underflow to zero without a skip.
+MIN_GRAD_SCALE = 2.0**10
+
+
+def _update_scaler(scaler: torch.amp.GradScaler) -> None:
+  """``scaler.update()``, then the scale raised to ``MIN_GRAD_SCALE`` if below, on the
+  device (``get_scale`` would sync with the host)."""
+  scaler.update()
+  if scaler.is_enabled():
+    assert scaler._scale is not None
+    scaler._scale.clamp_(min=MIN_GRAD_SCALE)
+
+
 def clip_policy_gradients(
   parameters: Iterable[nn.Parameter], max_norm: float, max_value: float
 ) -> torch.Tensor:
@@ -326,7 +340,7 @@ class SuperMimic:
       )
       skip = ~(torch.isfinite(loss) & torch.isfinite(grad_norm))
       _step_unless(self.world_model_optimizer, skip)
-      self.world_model_scaler.update()
+      _update_scaler(self.world_model_scaler)
       self._skipped_world_model_steps += skip
       sums += torch.stack((state_loss, termination_loss, last_error)).detach()
     means = sums / cfg.batches_per_update
@@ -386,7 +400,9 @@ class SuperMimic:
     if self.policy_cfg.analytic_termination:
       return self.iface.termination_soft(next_states, frames).view(horizon, num)
     head_goals = self.iface.goal(next_states, frames).view(horizon, num, -1)
-    return torch.sigmoid(self.world_model.termination_head(next_features, head_goals))
+    logit = self.world_model.termination_head(next_features, head_goals)
+    # fp32 under autocast: in fp16, d < 2.4e-4 would round 1 - d to 1.
+    return torch.sigmoid(logit.float())
 
   def policy_objective(
     self,
@@ -538,7 +554,7 @@ class SuperMimic:
       self.policy_optimizer.step()
     else:
       self.skipped_policy_steps += 1
-    self.policy_scaler.update()
+    _update_scaler(self.policy_scaler)
     for module in frozen:
       module.requires_grad_(True)
 
