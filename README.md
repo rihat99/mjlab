@@ -302,10 +302,10 @@ fails 0.1 / 0.8 / 2.5 per pass. Both runs take 0.40 s per iteration (median over
   and every run trained with it plateaued at a normalised return of 0.40. Its reward
   and termination are compiled each on its own, which keeps the eager gradient.
   `--agent.precision.compile False` runs everything eagerly.
-  `tools/check_policy_grad.py` (about 5 minutes on one GPU) compares the compiled
+  `tools/check_policy_grad.py` (4-6 minutes on one GPU) compares the compiled
   learner's policy and world-model gradients with the eager learner's on the 14k
-  checkpoint and fails if the whole-objective compile would no longer be caught (it
-  gives cosine ~0.7; the shipped build 0.999+).
+  checkpoint and fails if the whole-objective compile would no longer be caught
+  (mean cosine 0.70–0.76 for that build, 0.998 or more for the TF32 and fp16 builds).
 - `PrecisionCfg.autocast` (default `"fp16"`): the world-model loss, the imagined steps
   and the policy objective run under fp16 autocast, each backward pass with its own
   dynamic gradient scaler (scales logged as `Metrics/*_grad_scale`; an overflow skips

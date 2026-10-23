@@ -18,8 +18,9 @@ world-model gradient after ``fit_world_model`` (its last batch). Candidates:
 Exit status 1 when ``compiled`` has a mean policy-gradient cosine below
 ``--min-cosine``, ``compiled_fp16`` below ``--min-cosine-fp16``, or
 ``whole_objective`` reaches ``--min-cosine`` (the check would not catch the bug).
-Single trials vary: 32-step rollouts are chaotic, TF32 alone moves single trials to
-cosine ~0.995. About 10 minutes on one GPU:
+Single trials vary: 32-step rollouts are chaotic, single trials of the TF32 build dip
+to cosine ~0.992 and of the fp16 build to ~0.983, hence the mean over 6 trials. 4-6
+minutes on one GPU:
 
     CUDA_VISIBLE_DEVICES=0 MUJOCO_GL=egl .venv/bin/python tools/check_policy_grad.py
 """
@@ -87,7 +88,7 @@ def main() -> int:
   )
   parser.add_argument("--motions-dir", type=Path, default=MOTIONS_DIR)
   parser.add_argument("--candidates", default=",".join(CANDIDATES))
-  parser.add_argument("--trials", type=int, default=3)
+  parser.add_argument("--trials", type=int, default=6)
   parser.add_argument("--warmup-calls", type=int, default=3)
   parser.add_argument("--fill-steps", type=int, default=200)
   parser.add_argument("--num-envs", type=int, default=4096)
