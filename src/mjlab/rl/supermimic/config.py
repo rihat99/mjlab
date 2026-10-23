@@ -73,10 +73,11 @@ class PolicyCfg:
   """Imagination executes a + action_noise_std * N(0, 1) (the collection noise,
   detached) like the simulator: the world model, the next observation's previous action
   and the action-rate reward see the noisy action. False: the clean action."""
-  analytic_termination: bool = False
+  analytic_termination: bool = True
   """Imagination uses the task's analytic soft termination (iface.termination_soft)
   instead of the learned head, in the objective and the critic targets (as
-  supermimic_vibed mdp.py:155-162); the head keeps training, for logging."""
+  supermimic_vibed mdp.py:155-162); the head keeps training, for logging. The
+  learned head failed more clips than the analytic rule at 14k (README results)."""
 
 
 @dataclass

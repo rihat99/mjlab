@@ -140,8 +140,9 @@ GPU=0 nohup tools/eval_watch.sh $DATA/runs/lafan_supermimic/<run> $TRAIN_PID \
     > $DATA/runs/lafan_supermimic/eval_watch.log 2>&1 &
 ```
 
-The analytic-termination arm adds `--agent.policy.analytic-termination True` after
-`--`. Anything after `--` goes to mjlab's `train` unchanged; `--clips a,b` trains on
+Analytic termination is the default; the learned-head arm adds
+`--agent.policy.analytic-termination False` after `--`. Anything after `--` goes to
+mjlab's `train` unchanged; `--clips a,b` trains on
 a subset; `--print-cmd` only prints the command.
 
 Evaluate a checkpoint (default: the newest run and its last checkpoint) on its
@@ -234,8 +235,9 @@ the compile bug, speed, comparison with the colleague's run, local task notes ou
   hyperparameter (Tables A.1–A.5); fields marked "(choice)" are not given in the
   paper. Override any field from the command line after `--`, e.g.
   `--agent.policy.horizon 16`.
-- `PolicyCfg.analytic_termination`: imagination uses the task's analytic soft
-  termination instead of the learned head (the head keeps training, for logging).
+- `PolicyCfg.analytic_termination` (default on): imagination uses the task's analytic
+  soft termination instead of the learned head (the head keeps training, for
+  logging). The learned head is kept for comparison only.
 - `PrecisionCfg.compile` (default on): `torch.compile` plus CUDA graphs for the
   world-model loss, the imagined step, the state heads and the critic loss. The
   policy objective always runs eagerly: compiled, its forward matched eager but its

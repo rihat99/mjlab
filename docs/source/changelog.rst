@@ -21,6 +21,9 @@ Added
   ``evaluate_library`` script. ``train`` and ``play`` accept a motion library.
   The learner's hot paths run through ``torch.compile`` and CUDA graphs
   (``precision.compile``, on by default; about 4x faster per iteration).
+  Imagination uses the task's analytic termination by default
+  (``policy.analytic_termination``); the learned termination head is kept for
+  comparison.
 - Added a ``cu126`` extra (``uv sync --extra cu126``) that installs torch built for
   CUDA 12.6, for machines whose NVIDIA driver is older than 580. It does not include
   kernels for Blackwell GPUs.
