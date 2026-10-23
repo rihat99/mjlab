@@ -237,6 +237,40 @@ Runs: `$DATA/runs/lafan_supermimic/2026-10-23_00-33-44_final_learnedhead/` and
 the compile bug, speed, comparison with the colleague's run, local task notes outside this repository):
 `/home/rikhat.akizhanov/better/tracking/BetterRetarget/agent_notes/tasks/2026-10-22_14-35_supermimic/REPORT.md`.
 
+Retrain on `task/retrain`: two 14,000-iteration runs (seed 42, 4096 envs), both with
+the pelvis anchor and fall test and analytic termination, differing only in the
+contact physics: `uni_env` (the default task: no self-collision, friction
+randomisation on all robot geoms, ground 0.3 in training) and `pelvis_analytic` (the
+`-SelfCollision` task: the physics of the 14k runs above). Each checkpoint is
+evaluated in its own task's play cfg with 8 rollouts per clip
+(`--rollouts-per-clip 8`, no added noise), because a single rollout is one random draw
+(see the evaluation note in Commands). Clip and survived are means over the 8 passes
+of 40 clips; failed is the mean number of failed clips per pass (min–max over passes);
+"1 rollout" is the checkpoint's `eval_watch` evaluation.
+
+| run | iteration | eval clip | eval survived | failed per pass | failed, 1 rollout |
+|---|---|---|---|---|---|
+| uni_env | 10000 | 0.898 | 0.898 | 0.0 (0–0) | 0 / 40 |
+| uni_env | 12000 | 0.910 | 0.910 | 0.1 (0–1) | 1 / 40 |
+| uni_env | 14000 | 0.915 | 0.915 | 0.0 (0–0) | 0 / 40 |
+| pelvis_analytic | 10000 | 0.869 | 0.888 | 2.4 (0–4) | 2 / 40 |
+| pelvis_analytic | 12000 | 0.891 | 0.900 | 1.8 (0–3) | 0 / 40 |
+| pelvis_analytic | 14000 | 0.884 | 0.899 | 1.2 (1–3) | 3 / 40 |
+
+The same 8-rollout evaluation of the 14k torso runs above, with their physics and the
+torso fall test: learned head 0.886 / 0.906 / 3.4 (2–5), analytic 0.884 / 0.898 / 1.5
+(0–4); with the pelvis fall test the analytic run fails 5.1 per pass, mostly floor
+rolls where the reference pelvis turns over (dance1_s1, dance2_s4, fall1_s1,
+jumps1_s2), which `pelvis_analytic` does not fail at 14k. The 0 failures of `uni_env` need
+its contact model at evaluation: with self-collision on (the `-SelfCollision` task)
+the same checkpoints fail 28.8 / 24.9 / 16.2 clips per pass at 10k / 12k / 14k
+(survived 0.89–0.91 before the fall), so they rely on the absence of self-contacts,
+which a real robot has. `pelvis_analytic` evaluated with `--self-collision False`
+fails 0.1 / 0.8 / 2.5 per pass. Both runs take 0.40 s per iteration (median over
+12k–14k). Runs: `$DATA/runs/lafan_supermimic/2026-10-23_21-20-15_uni_env/` and
+`2026-10-23_21-46-09_pelvis_analytic/`, evaluations in
+`eval_library_model_<it>_copies8[_selfcoll|_noselfcoll].json`.
+
 ## Configuration pointers
 
 - `SuperMimicRunnerCfg` (`src/mjlab/rl/supermimic/config.py`): every paper
