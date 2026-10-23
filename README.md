@@ -229,8 +229,13 @@ A colleague's independent implementation (Isaac Lab / Newton, same clips and
 hyperparameters) reaches 0.842 survived with 0 / 40 failed at 14,000 iterations. The
 analytic-termination arm reaches 0.884 clip / 0.899 survived / 2 failed. The two
 evaluators use different simulators and reward implementations, so the offset only
-shows the same level, not a better policy. Speed: 0.40 s per iteration on an idle
-RTX PRO 6000 (paper: 0.11 s on an H100).
+shows the same level, not a better policy. Speed: these runs took 0.40 s per
+iteration on an idle RTX PRO 6000 (paper: 0.11 s on an H100). The current code takes
+0.24 s per steady-state iteration at 4096 envs on the same card (0.25 s in a training
+run's log; 0.32 s with `--agent.precision.autocast none`): the objective's reward and
+termination are compiled, the motion library is static for the CUDA graphs, host
+syncs are gone from the world-model steps and the env step, and the world-model fit
+and the policy update run in fp16 (see `PrecisionCfg` below).
 
 Runs: `$DATA/runs/lafan_supermimic/2026-10-23_00-33-44_final_learnedhead/` and
 `2026-10-23_00-33-45_final_analyticterm/`. Detailed report (curves, per-clip table,
@@ -292,17 +297,30 @@ fails 0.1 / 0.8 / 2.5 per pass. Both runs take 0.40 s per iteration (median over
   logging). The learned head is kept for comparison only.
 - `PrecisionCfg.compile` (default on): `torch.compile` plus CUDA graphs for the
   world-model loss, the imagined step, the state heads and the critic loss. The
-  policy objective always runs eagerly: compiled, its forward matched eager but its
-  backward did not (gradient cosine 0.52–0.54 to the eager gradient), and every
-  run trained with it plateaued at a normalised return of 0.40. Eager costs about
-  14 % per iteration. `--agent.precision.compile False` runs everything eagerly.
+  policy objective always runs eagerly: compiled as a whole, its forward matched
+  eager but its backward did not (gradient cosine 0.52–0.54 to the eager gradient),
+  and every run trained with it plateaued at a normalised return of 0.40. Its reward
+  and termination are compiled each on its own, which keeps the eager gradient.
+  `--agent.precision.compile False` runs everything eagerly.
+  `tools/check_policy_grad.py` (about 5 minutes on one GPU) compares the compiled
+  learner's policy and world-model gradients with the eager learner's on the 14k
+  checkpoint and fails if the whole-objective compile would no longer be caught (it
+  gives cosine ~0.7; the shipped build 0.999+).
+- `PrecisionCfg.autocast` (default `"fp16"`): the world-model loss, the imagined steps
+  and the policy objective run under fp16 autocast, each backward pass with its own
+  dynamic gradient scaler (scales logged as `Metrics/*_grad_scale`; an overflow skips
+  the step and counts it in `Metrics/*_skipped_steps`). Collection and the critic stay
+  fp32. Policy-gradient cosine to the eager fp32 gradient 0.998–0.9996 (TF32 compiled
+  0.9998–0.9999). Over 1500 iterations the curves overlap the fp32 run's (sim return
+  0.511 vs 0.512 at 1500); the world-model scaler skipped 4 of 15,000 steps, each when
+  its periodic growth (x2 after 2000 clean steps) overflowed. Not yet compared over a
+  full 14k run; `"none"` restores fp32 with TF32 matmuls.
 
 ## Known limitations and open items
 
 - The exact operation `torch.compile` mis-differentiates in the policy objective is
-  not localised; re-enabling it needs a gradient test with the joint-velocity reward
-  path (the synthetic-task test in `tests/test_supermimic_rl.py` does not exercise
-  it).
+  not localised (the synthetic-task test in `tests/test_supermimic_rl.py` does not
+  exercise it; `tools/check_policy_grad.py` on the real task does).
 - Ablation suggested by the gradient diagnostic, not run: the critic-bootstrap term
   alone collapsed the policy, reward-only improved more than the full objective over
   25 updates.
@@ -313,7 +331,7 @@ fails 0.1 / 0.8 / 2.5 per pass. Both runs take 0.40 s per iteration (median over
   run; evaluation failures are single rollouts per clip and change between
   checkpoints (2–7). Align the fall criterion and average a few rollouts per clip
   before the next comparison.
-- Paper budget not run: 320k iterations, about 36 h at 0.40 s.
+- Paper budget not run: 320k iterations, about 22 h at 0.25 s.
 - BONES-SEED dataset: not started.
 - `render_viser_supermimic.py`: the second video rendered in the same process is
   3–10x slower than the first; render one ghost per process (`--ghosts reference`,

@@ -39,6 +39,15 @@ Added
 Changed
 ^^^^^^^
 
+- SuperMimic iterations take 0.24 s instead of 0.40 s (4096 envs, 40 clips, RTX PRO
+  6000). Same maths, 0.40 to 0.32 s: the policy objective's reward and termination are
+  compiled (the objective itself stays eager), the motion library is marked static
+  for the CUDA graphs (each replay copied the whole library, a cost that grew with its
+  size), and host syncs are gone from the world-model steps and four places of the
+  env step. Then 0.32 to 0.24 s: the world-model fit and the policy update run under
+  fp16 autocast with a gradient scaler each (``precision.autocast``, default
+  ``"fp16"``; ``"none"`` keeps fp32 with TF32). ``tools/check_policy_grad.py``
+  compares the compiled learner's gradients with the eager learner's on a checkpoint.
 - Bumped ``rsl-rl-lib`` from 5.5.0 to 5.5.1. This removes the need for capping
   ``wandb`` below 0.29.
 
