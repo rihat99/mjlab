@@ -259,13 +259,19 @@ def run_evaluate_library(task_id: str, cfg: EvaluateLibraryConfig) -> dict[str, 
   result = evaluate_library(env, policy)
   command = cast(MotionCommand, env.unwrapped.command_manager.get_term("motion"))
   anchor_body = command.cfg.anchor_body_name
+  # Effective value: the task cfg itself may already have self-collisions off.
+  robot = env.unwrapped.cfg.scene.entities[command.cfg.entity_name]
+  self_collision = any(
+    any(c.contype.values()) if isinstance(c.contype, dict) else c.contype
+    for c in robot.collisions
+  )
   result["provenance"] = {
     "task": task_id,
     "checkpoint_file": str(checkpoint.resolve()),
     "motion_files": [str(Path(f).resolve()) for f in cfg.motion_files],
     "anchor_body": anchor_body,
     "fall_body": cfg.fall_body or anchor_body,
-    "self_collision": cfg.self_collision,
+    "self_collision": self_collision,
     "train_noise": cfg.train_noise,
   }
   output = Path(
