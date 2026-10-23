@@ -3,20 +3,21 @@
 A compiled policy objective once matched the eager loss to 1e-5 with a policy gradient
 at cosine ~0.5 to the eager one, and every run trained with it stalled; this check
 compares gradients, not losses, on the real task. It builds the SuperMimic env on a
-motion library, loads a checkpoint into an eager reference learner (no compile, TF32)
-and fills a replay buffer with ``--fill-steps`` sim steps of its policy.
+motion library, loads a checkpoint into an eager reference learner (no compile, no
+autocast, TF32) and fills a replay buffer with ``--fill-steps`` sim steps of its policy.
 Each candidate learner loads the same checkpoint and runs ``update_policy`` with the
 reference's torch seed (same seeds, noise and batches), optimiser steps disabled; the
 policy gradient is compared as stored in ``.grad`` (after both clips), and likewise the
 world-model gradient after ``fit_world_model`` (its last batch). Candidates:
 
-  compiled         the default build (``precision.compile``)
+  compiled         the compiled build (``precision.compile``) without autocast
+  compiled_fp16    the default build: compiled, fp16 autocast, gradient scalers
   whole_objective  the policy objective compiled as one function: the known-bad build,
                    which the check must catch
 
 Exit status 1 when ``compiled`` has a mean policy-gradient cosine below
-``--min-cosine`` or ``whole_objective`` reaches it (the check would not catch the
-bug).
+``--min-cosine``, ``compiled_fp16`` below ``--min-cosine-fp16``, or
+``whole_objective`` reaches ``--min-cosine`` (the check would not catch the bug).
 Single trials vary: 32-step rollouts are chaotic, TF32 alone moves single trials to
 cosine ~0.995. About 10 minutes on one GPU:
 
@@ -48,7 +49,7 @@ from mjlab.tasks.tracking.mdp.commands import MotionCommandCfg
 TASK = "Mjlab-Tracking-Flat-Unitree-G1-SuperMimic"
 CHECKPOINT = LOG_ROOT / "2026-10-23_00-33-44_final_learnedhead" / "model_14000.pt"
 PARTS = {"actor": True, "critic": True, "world_model": True, "optimizer": True}
-CANDIDATES = ("compiled", "whole_objective")
+CANDIDATES = ("compiled", "compiled_fp16", "whole_objective")
 
 
 def log(message: str) -> None:
@@ -97,6 +98,7 @@ def main() -> int:
     help="policy.analytic_termination for every learner (cfg: the task default)",
   )
   parser.add_argument("--min-cosine", type=float, default=0.995)
+  parser.add_argument("--min-cosine-fp16", type=float, default=0.99)
   parser.add_argument("--out", type=Path, default=None, help="JSON of all trials")
   args = parser.parse_args()
   device = "cuda:0"
@@ -115,6 +117,7 @@ def main() -> int:
   if args.analytic_termination != "cfg":
     agent_cfg.policy.analytic_termination = args.analytic_termination == "true"
   agent_cfg.precision.compile = False
+  agent_cfg.precision.autocast = "none"
   env = RslRlVecEnvWrapper(
     ManagerBasedRlEnv(cfg=env_cfg, device=device), clip_actions=agent_cfg.clip_actions
   )
@@ -148,6 +151,7 @@ def main() -> int:
       device,
       compile=True,
       action_noise_std=runner.collection_cfg.action_noise_std,
+      autocast="fp16" if candidate == "compiled_fp16" else "none",
     )
     alg.load_state_dict(checkpoint, PARTS, strict=True)
     disable_steps(alg)
@@ -164,7 +168,7 @@ def main() -> int:
     if candidate not in CANDIDATES:
       raise ValueError(f"Unknown candidate {candidate!r}; choose from {CANDIDATES}.")
     alg = build(candidate)
-    # Compile and record the CUDA graphs.
+    # Compile, record the CUDA graphs and let the gradient scalers settle.
     for _ in range(args.warmup_calls):
       alg.fit_world_model(buffer)
       alg.update_policy(buffer)
@@ -196,6 +200,14 @@ def main() -> int:
       alg.skipped_world_model_steps - skipped[0],
       alg.skipped_policy_steps - skipped[1],
     )
+    scales = {
+      name: float(scaler.get_scale())
+      for name, scaler in (
+        ("world_model", alg.world_model_scaler),
+        ("policy", alg.policy_scaler),
+      )
+      if scaler.is_enabled()
+    }
     mean_policy = sum(policy_cosines) / len(policy_cosines)
     mean_world_model = sum(world_model_cosines) / len(world_model_cosines)
     summary = {
@@ -203,11 +215,14 @@ def main() -> int:
       "mean_policy_grad_cosine": mean_policy,
       "mean_world_model_grad_cosine": mean_world_model,
       "skipped_steps_during_trials_world_model_policy": trial_skips,
+      "grad_scales": scales,
     }
     results.append(summary)
     log(json.dumps(summary))
     if candidate == "compiled" and not mean_policy >= args.min_cosine:
       failures.append(f"compiled: mean policy cosine {mean_policy:.5f}")
+    if candidate == "compiled_fp16" and not mean_policy >= args.min_cosine_fp16:
+      failures.append(f"compiled_fp16: mean policy cosine {mean_policy:.5f}")
     if candidate == "whole_objective" and mean_policy >= args.min_cosine:
       failures.append(
         f"whole_objective: mean policy cosine {mean_policy:.5f}; the check no longer "

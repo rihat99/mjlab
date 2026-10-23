@@ -109,6 +109,7 @@ class SuperMimicRunner:
       device,
       compile=precision_cfg.compile,
       action_noise_std=self.collection_cfg.action_noise_std,
+      autocast=precision_cfg.autocast,
     )
 
     # rsl_rl's Logger reads PPO-shaped keys; give it its own view of the cfg.
@@ -421,6 +422,12 @@ class SuperMimicRunner:
         max_step_reward * length_sum
       )
       scalars["Train/termination_rate"] = float(stats["terminated"]) / stats["episodes"]
+    for name, scaler in (
+      ("world_model", self.alg.world_model_scaler),
+      ("policy", self.alg.policy_scaler),
+    ):
+      if scaler.is_enabled():
+        scalars[f"Metrics/{name}_grad_scale"] = scaler.get_scale()
     for key, value in self.interface.sampler_log().items():
       scalars[f"Metrics/sampler_{key}"] = value
     names = ("sim", "world_model", "policy", "critic")

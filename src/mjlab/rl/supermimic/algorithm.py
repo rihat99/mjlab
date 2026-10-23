@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 from torch import nn
@@ -63,6 +64,11 @@ def _maybe_compile(fn: Callable, enabled: bool, mode: str | None = None) -> Call
   return torch.compile(fn, mode=mode) if enabled else fn
 
 
+def _maybe_fp16(fn: Callable, enabled: bool, device: torch.device) -> Callable:
+  """``fn`` under fp16 autocast when enabled, else ``fn`` itself."""
+  return torch.autocast(device.type, dtype=torch.float16)(fn) if enabled else fn
+
+
 def _step_unless(optimizer: torch.optim.Optimizer, skip: torch.Tensor) -> None:
   """``optimizer.step()`` unless ``skip`` (0-dim bool). Fused Adam decides on the
   device through its ``found_inf`` (no update, step count kept: the same as not
@@ -100,10 +106,16 @@ class SuperMimic:
     device: str | torch.device,
     compile: bool = False,
     action_noise_std: float = 0.0,
+    autocast: Literal["none", "fp16"] = "none",
   ) -> None:
     """``action_noise_std`` is the simulator's action noise (the runner passes
     ``CollectionCfg.action_noise_std``); imagination adds it to the policy action when
-    ``policy_cfg.imagine_action_noise``."""
+    ``policy_cfg.imagine_action_noise``. ``autocast="fp16"`` runs the world-model
+    loss, the imagined steps and the policy objective under fp16 autocast, each
+    backward pass on a loss scaled by its gradient scaler (``world_model_scaler``,
+    ``policy_scaler``; see ``PrecisionCfg.autocast``)."""
+    if autocast not in ("none", "fp16"):
+      raise ValueError(f"autocast must be 'none' or 'fp16', got {autocast!r}.")
     self.iface = iface
     self.world_model_cfg = world_model_cfg
     self.policy_cfg = policy_cfg
@@ -138,6 +150,10 @@ class SuperMimic:
     self.critic_optimizer = torch.optim.Adam(
       self.critic.parameters(), lr=critic_cfg.lr, fused=fused
     )
+    # Dynamic loss scales of the fp16 backward passes; disabled they do nothing.
+    fp16 = autocast == "fp16"
+    self.world_model_scaler = torch.amp.GradScaler(self.device.type, enabled=fp16)
+    self.policy_scaler = torch.amp.GradScaler(self.device.type, enabled=fp16)
     self.skipped_policy_steps = 0
     # Counted on the device (see skipped_world_model_steps).
     self._skipped_world_model_steps = torch.zeros(
@@ -152,14 +168,18 @@ class SuperMimic:
     # update in place); the objective reads the critic normaliser, which rsl_rl
     # replaces each iteration, and the state heads also serve variable-size batches.
     graphs = "reduce-overhead"
-    self._world_model_loss = _maybe_compile(world_model_loss, compile, graphs)
+    self._world_model_loss = _maybe_fp16(
+      _maybe_compile(world_model_loss, compile, graphs), fp16, self.device
+    )
     self._state_heads = _maybe_compile(self.state_heads, compile)
-    self._imagine_step = _maybe_compile(self.imagine_step, compile, graphs)
+    self._imagine_step = _maybe_fp16(
+      _maybe_compile(self.imagine_step, compile, graphs), fp16, self.device
+    )
     # Eager: compiled as a whole, its forward matched but its policy gradient did not
     # (cosine ~0.54 to the eager gradient on identical rollouts, D2 stage H). Its
     # reward and termination, compiled each on its own, keep the eager gradient
     # (tools/check_policy_grad.py checks both).
-    self._policy_objective = self.policy_objective
+    self._policy_objective = _maybe_fp16(self.policy_objective, fp16, self.device)
     self._reward = _maybe_compile(iface.reward, compile)
     self._termination = _maybe_compile(self.termination, compile)
     self._critic_loss = _maybe_compile(self.critic_loss, compile, graphs)
@@ -274,7 +294,9 @@ class SuperMimic:
     """``batches_per_update`` Adam steps of the k-step loss; returns mean metrics.
 
     With ``running_statistics`` the statistics are first updated from the sampled
-    windows. A step with a non-finite loss or gradient norm is skipped and counted.
+    windows. A step with a non-finite loss or gradient norm is skipped and counted
+    (with fp16 this includes an overflow of the scaled gradients, after which the
+    scaler halves its scale).
     """
     cfg = self.world_model_cfg
     context_all = self.iface.context_normalized()
@@ -297,12 +319,14 @@ class SuperMimic:
       )
       loss = state_loss + termination_loss
       self.world_model_optimizer.zero_grad(set_to_none=True)
-      loss.backward()
+      self.world_model_scaler.scale(loss).backward()
+      self.world_model_scaler.unscale_(self.world_model_optimizer)
       grad_norm = nn.utils.clip_grad_norm_(
         self.world_model.parameters(), cfg.max_grad_norm
       )
       skip = ~(torch.isfinite(loss) & torch.isfinite(grad_norm))
       _step_unless(self.world_model_optimizer, skip)
+      self.world_model_scaler.update()
       self._skipped_world_model_steps += skip
       sums += torch.stack((state_loss, termination_loss, last_error)).detach()
     means = sums / cfg.batches_per_update
@@ -429,8 +453,9 @@ class SuperMimic:
     The world model, termination head and critic are frozen (requires_grad False) but
     gradients flow through their inputs. Gradients are clipped by global norm, then
     element-wise; a step with a non-finite loss, rollout or gradient norm is skipped
-    and counted. Returns metrics, the detached rollout and whether the loss and the
-    rollout are finite (the critic must not be fit on a non-finite rollout).
+    and counted (with fp16 this includes an overflow of the scaled gradients).
+    Returns metrics, the detached rollout and whether the loss and the rollout are
+    finite (the critic must not be fit on a non-finite rollout).
     """
     cfg = self.policy_cfg
     iface = self.iface
@@ -502,7 +527,8 @@ class SuperMimic:
     )
 
     self.policy_optimizer.zero_grad(set_to_none=True)
-    loss.backward()
+    self.policy_scaler.scale(loss).backward()
+    self.policy_scaler.unscale_(self.policy_optimizer)
     grad_norm = clip_policy_gradients(
       self.policy.parameters(), cfg.max_grad_norm, cfg.max_grad_value
     )
@@ -512,6 +538,7 @@ class SuperMimic:
       self.policy_optimizer.step()
     else:
       self.skipped_policy_steps += 1
+    self.policy_scaler.update()
     for module in frozen:
       module.requires_grad_(True)
 
@@ -587,6 +614,8 @@ class SuperMimic:
       "policy_optimizer_state_dict": self.policy_optimizer.state_dict(),
       "critic_optimizer_state_dict": self.critic_optimizer.state_dict(),
       "world_model_optimizer_state_dict": self.world_model_optimizer.state_dict(),
+      "policy_scaler_state_dict": self.policy_scaler.state_dict(),
+      "world_model_scaler_state_dict": self.world_model_scaler.state_dict(),
       "skipped_policy_steps": self.skipped_policy_steps,
       "skipped_world_model_steps": self.skipped_world_model_steps,
       "critic_fitted": self.critic_fitted,
@@ -608,5 +637,12 @@ class SuperMimic:
       self.world_model_optimizer.load_state_dict(
         state["world_model_optimizer_state_dict"]
       )
+      # Checkpoints without fp16 have no (or empty) scaler states.
+      for scaler, key in (
+        (self.policy_scaler, "policy_scaler_state_dict"),
+        (self.world_model_scaler, "world_model_scaler_state_dict"),
+      ):
+        if state.get(key):
+          scaler.load_state_dict(state[key])
       self.skipped_policy_steps = state["skipped_policy_steps"]
       self.skipped_world_model_steps = state["skipped_world_model_steps"]

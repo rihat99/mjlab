@@ -1,6 +1,7 @@
 """SuperMimic runner configuration. Defaults are the paper's Table A.5 unless noted."""
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 from mjlab.rl.config import RslRlBaseRunnerCfg
 
@@ -122,13 +123,21 @@ class ScheduleCfg:
 @dataclass
 class PrecisionCfg:
   tf32: bool = True
-  """Allow TF32 matmuls and convolutions (no autocast, no bf16)."""
+  """Allow TF32 matmuls and convolutions (those that ``autocast`` leaves in fp32)."""
   compile: bool = True
   """``torch.compile`` the world-model loss, the imagined step, the state heads and the
   critic loss (CUDA graphs except the state heads) and use fused Adam: the same math
   with far fewer kernel launches. The policy objective stays eager (compiled as a
   whole, its backward was wrong); its reward and termination are compiled each on
   its own. False runs everything eagerly."""
+  autocast: Literal["fp16", "none"] = "fp16"
+  """(choice) "fp16": the world-model loss, the imagined steps and the policy
+  objective run under fp16 autocast (matmuls in fp16 with fp32 accumulation, about
+  twice the TF32 rate; fp16 keeps TF32's 10-bit mantissa), and each of the two
+  backward passes runs on a loss scaled by its own dynamic ``torch.amp.GradScaler``;
+  the gradients are unscaled before the clips, a step whose scaled gradients
+  overflow is skipped and counted. Collection and the critic fit stay fp32. "none":
+  fp32 throughout (TF32 matmuls with ``tf32``)."""
 
 
 @dataclass
