@@ -29,7 +29,7 @@ and the simulated force averaged over the step's 4 substeps (thin, green). Sim t
 motion time: a reset (start or termination) puts the robot at frame 0 with sim time 0.
 
 Input contract: ``--br-dir`` holds ``<clip>_br.npz`` per clip, the retargeter's plan
-(written by BetterRetarget's ``dump_br_plan.py``; BR below). Keys read here, T plan
+(written by BetterRetarget's ``scripts/dump_mjlab_plan.py``; BR below). Keys read here, T plan
 frames, B contacting bodies:
 
 - ``time`` (T,) s, motion time of each plan frame; ``valid`` (T,) bool, frames with a

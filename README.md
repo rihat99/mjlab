@@ -88,8 +88,8 @@ Everything lives under the data root `$MJLAB_DATA`, by default
   BetterRetarget result format version 2, `time`, `fps`, `root_pos`, `root_quat` xyzw,
   `dof_pos`, `dof_names`, `dof_mask`, plus a json with `status` ok).
 - `runs/<clip>/<run>/`: training runs (`train_tracker.py`, `train_queue.py`):
-  `params/{env,agent}.yaml`, `git/mjlab.diff` (commit, status and diff of the code at
-  launch), `metrics.csv`, `curves.png`, TensorBoard events, `model_<it>.pt` (the full
+  `params/{env,agent}.yaml`, `git/<checkout dir>.diff` (commit, status and diff of the
+  code at launch), `metrics.csv`, `curves.png`, TensorBoard events, `model_<it>.pt` (the full
   runs keep every 5000 and the last, 29999), `<run>.onnx`,
   `eval_model_<it>[_<variant>].json` and, for gain tasks,
   `eval_model_<it>[_<variant>]_gains.npz`. `runs/<clip>/motion_<sha256[:12]>.npz` is the
@@ -116,9 +116,10 @@ Runs trained before the data root moved record the old absolute motion path in
 ## Commands
 
 All from the repo root, `PY=.venv/bin/python`; `$MJLAB_DATA` below is the data root
-(export it, or write the default path). Every tool takes `--gpu N` (default 0) and sets
-`CUDA_VISIBLE_DEVICES`, `MUJOCO_EGL_DEVICE_ID`, `MUJOCO_GL=egl` and
-`WANDB_MODE=disabled` itself; `--help` prints the full docstring.
+(export it, or write the default path). The tools that use a GPU take `--gpu N`
+(default 0; `train_queue.py` takes `--gpus`) and set `CUDA_VISIBLE_DEVICES`,
+`MUJOCO_EGL_DEVICE_ID`, `MUJOCO_GL=egl` and `WANDB_MODE=disabled` themselves;
+`--help` prints the full docstring.
 
 ```bash
 # Convert retargeted clips into motions/<clip>.npz (mjlab's csv_to_npz path, 50 Hz).
@@ -162,7 +163,7 @@ extracted copy of the library (`apt-get download libasound2t64; dpkg-deb -x ...`
 NVIDIA Vulkan ICD (`/usr/share/vulkan/icd.d/nvidia_icd.json`); `--software` renders
 with SwiftShader instead. `render_force_ghost.py --br-dir` reads the planned contact
 forces as `<clip>_br.npz` (keys in its docstring), which BetterRetarget's
-`dump_br_plan.py` writes.
+`scripts/dump_mjlab_plan.py` writes.
 
 ## Key results
 
