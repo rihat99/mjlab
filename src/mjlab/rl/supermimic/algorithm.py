@@ -140,9 +140,13 @@ class SuperMimic:
     self._world_model_loss = _maybe_compile(world_model_loss, compile, graphs)
     self._state_heads = _maybe_compile(self.state_heads, compile)
     self._imagine_step = _maybe_compile(self.imagine_step, compile, graphs)
-    # Eager: compiled, its forward matched but its policy gradient did not (cosine
-    # ~0.54 to the eager gradient on identical rollouts, D2 stage H).
+    # Eager: compiled as a whole, its forward matched but its policy gradient did not
+    # (cosine ~0.54 to the eager gradient on identical rollouts, D2 stage H). Its
+    # reward and termination, compiled each on its own, keep the eager gradient
+    # (tools/check_policy_grad.py checks both).
     self._policy_objective = self.policy_objective
+    self._reward = _maybe_compile(iface.reward, compile)
+    self._termination = _maybe_compile(self.termination, compile)
     self._critic_loss = _maybe_compile(self.critic_loss, compile, graphs)
 
   def set_learning_rate_scale(self, scale: float) -> None:
@@ -324,6 +328,18 @@ class SuperMimic:
     next_features, next_goal = self.state_heads(s_next, next_frame)
     return action, s_next, obs, next_features, next_goal
 
+  def termination(
+    self, next_states: torch.Tensor, frames: torch.Tensor, next_features: torch.Tensor
+  ) -> torch.Tensor:
+    """Termination probabilities (H, B) d_1..d_H of the states s_{t+1} (H * B, S)
+    judged at frames k_t (H * B,), with their features (H, B, F): the learned head on
+    the goal at k_t, or the task's soft rule with ``analytic_termination``."""
+    horizon, num = next_features.shape[:2]
+    if self.policy_cfg.analytic_termination:
+      return self.iface.termination_soft(next_states, frames).view(horizon, num)
+    head_goals = self.iface.goal(next_states, frames).view(horizon, num, -1)
+    return torch.sigmoid(self.world_model.termination_head(next_features, head_goals))
+
   def policy_objective(
     self,
     states: list[torch.Tensor],
@@ -353,18 +369,12 @@ class SuperMimic:
     # over (horizon, B), far fewer kernel launches than per step.
     next_states = torch.cat(states)
     frames = torch.cat(reward_frames)
-    reward = self.iface.reward(
+    reward = self._reward(
       next_states, torch.cat(actions), torch.cat(prev_actions), frames
     ).view(horizon, num)
     all_features = torch.stack(feature_list)
     all_goals = torch.stack(goal_list)
-    if cfg.analytic_termination:
-      termination = self.iface.termination_soft(next_states, frames).view(horizon, num)
-    else:
-      head_goals = self.iface.goal(next_states, frames).view(horizon, num, -1)
-      termination = torch.sigmoid(
-        self.world_model.termination_head(all_features[1:], head_goals)
-      )  # (horizon, B): d_1..d_H
+    termination = self._termination(next_states, frames, all_features[1:])
     survival_next = torch.cumprod(1.0 - termination, dim=0)  # c_1..c_H
     survival = torch.cat((torch.ones_like(survival_next[:1]), survival_next[:-1]))
     discount = cfg.gamma ** torch.arange(horizon, device=reward.device).unsqueeze(-1)

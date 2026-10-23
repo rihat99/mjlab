@@ -126,8 +126,9 @@ class PrecisionCfg:
   compile: bool = True
   """``torch.compile`` the world-model loss, the imagined step, the state heads and the
   critic loss (CUDA graphs except the state heads) and use fused Adam: the same math
-  with far fewer kernel launches. The policy objective stays eager (its compiled
-  backward was wrong). False runs everything eagerly."""
+  with far fewer kernel launches. The policy objective stays eager (compiled as a
+  whole, its backward was wrong); its reward and termination are compiled each on
+  its own. False runs everything eagerly."""
 
 
 @dataclass
