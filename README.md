@@ -207,7 +207,7 @@ gains are not constant: each joint follows a strong motion-phase schedule (kp sw
 0.25–3.9 x nominal within a stride), and every Vic policy falls within 2 s when its
 gains are frozen.
 
-Detailed report (method, calibration, protocol, all tables and figures):
+Detailed report (method, calibration, protocol, all tables and figures, local task notes outside this repository):
 `/home/rikhat.akizhanov/better/tracking/BetterRetarget/agent_notes/tasks/2026-10-20_20-26_vic_gains/REPORT.md`.
 Videos and gain / torque figures of the 88_06 trackers:
 `/home/rikhat.akizhanov/better/tracking/BetterRetarget/agent_notes/tasks/2026-10-21_13-00_vic_video/REPORT.md`;
