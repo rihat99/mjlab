@@ -156,7 +156,12 @@ ignore = ["B011"]
 pythonVersion = "3.10"
 venvPath = "."
 venv = ".venv"
-ignore = ["./typings", "./src/mjlab/utils/lab_api", "./docs"]
+ignore = [
+  "./typings",
+  "./src/mjlab/utils/lab_api",
+  "./docs",
+  "./scripts/benchmarks",  # nightly WandB benchmarks; this fork has no WandB
+]
 stubPath = "typings"
 
 [tool.ty.environment]
