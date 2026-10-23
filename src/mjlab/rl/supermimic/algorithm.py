@@ -63,6 +63,18 @@ def _maybe_compile(fn: Callable, enabled: bool, mode: str | None = None) -> Call
   return torch.compile(fn, mode=mode) if enabled else fn
 
 
+def _step_unless(optimizer: torch.optim.Optimizer, skip: torch.Tensor) -> None:
+  """``optimizer.step()`` unless ``skip`` (0-dim bool). Fused Adam decides on the
+  device through its ``found_inf`` (no update, step count kept: the same as not
+  stepping) without a host sync; other optimisers read ``skip`` on the host."""
+  if optimizer.defaults.get("fused"):
+    optimizer.found_inf = skip.float()  # type: ignore[attr-defined]
+    optimizer.step()
+    del optimizer.found_inf  # type: ignore[attr-defined]
+  elif not skip:
+    optimizer.step()
+
+
 def clip_policy_gradients(
   parameters: Iterable[nn.Parameter], max_norm: float, max_value: float
 ) -> torch.Tensor:
@@ -127,7 +139,10 @@ class SuperMimic:
       self.critic.parameters(), lr=critic_cfg.lr, fused=fused
     )
     self.skipped_policy_steps = 0
-    self.skipped_world_model_steps = 0
+    # Counted on the device (see skipped_world_model_steps).
+    self._skipped_world_model_steps = torch.zeros(
+      (), dtype=torch.long, device=self.device
+    )
     # An untrained critic's values are noise: the runner bootstraps with them only
     # once the critic has been fit.
     self.critic_fitted = False
@@ -148,6 +163,16 @@ class SuperMimic:
     self._reward = _maybe_compile(iface.reward, compile)
     self._termination = _maybe_compile(self.termination, compile)
     self._critic_loss = _maybe_compile(self.critic_loss, compile, graphs)
+
+  @property
+  def skipped_world_model_steps(self) -> int:
+    """World-model steps skipped for a non-finite loss or gradient norm (reading it
+    syncs the host with the device)."""
+    return int(self._skipped_world_model_steps)
+
+  @skipped_world_model_steps.setter
+  def skipped_world_model_steps(self, value: int) -> None:
+    self._skipped_world_model_steps.fill_(value)
 
   def set_learning_rate_scale(self, scale: float) -> None:
     """Set every optimiser's learning rate to its configured value times ``scale``."""
@@ -276,10 +301,9 @@ class SuperMimic:
       grad_norm = nn.utils.clip_grad_norm_(
         self.world_model.parameters(), cfg.max_grad_norm
       )
-      if torch.isfinite(loss) & torch.isfinite(grad_norm):
-        self.world_model_optimizer.step()
-      else:
-        self.skipped_world_model_steps += 1
+      skip = ~(torch.isfinite(loss) & torch.isfinite(grad_norm))
+      _step_unless(self.world_model_optimizer, skip)
+      self._skipped_world_model_steps += skip
       sums += torch.stack((state_loss, termination_loss, last_error)).detach()
     means = sums / cfg.batches_per_update
     return {
