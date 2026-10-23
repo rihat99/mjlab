@@ -13,5 +13,6 @@ DATA_ROOT = Path(
   )
 )
 MOTIONS_DIR = DATA_ROOT / "motions_lafan"  # the LAFAN1 clips, tools/convert_lafan.py
+MOTIONS_SEED_DIR = DATA_ROOT / "motions_seed"  # BONES-SEED, tools/convert_seed.py
 LOG_ROOT = DATA_ROOT / "runs" / "lafan_supermimic"  # one folder per training run
 VISER_DIR = DATA_ROOT / "viser" / "supermimic"  # tools/render_viser_supermimic.py
