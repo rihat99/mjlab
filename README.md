@@ -53,7 +53,9 @@ so data collection concentrates on what it cannot track yet.
   - `render_viser.py`: rendering library (look, ghost model, viser scene, headless
     browser, caption);
   - `render_viser_supermimic.py`: SuperMimic rollout of one clip and its two videos;
-  - `convert_lafan.py`: rebuilds `motions_lafan/` from the LAFAN1 G1 CSVs.
+  - `convert_lafan.py`: rebuilds `motions_lafan/` from the LAFAN1 G1 CSVs;
+  - `convert_seed.py`, `filter_seed.py`: build `motions_seed/` from BONES-SEED and
+    apply the paper's App. E filters.
 
 The additions are also listed in `docs/source/changelog.rst`.
 
@@ -83,6 +85,9 @@ All data lives under one root, `$MJLAB_DATA`, by default
 
 - `motions_lafan/<clip>.npz`: the 40 LAFAN1 G1 clips at 50 Hz (441,140 frames,
   2.45 h), with the conversion logs and a README.
+- `motions_seed/<filename>.npz`: all 142,220 BONES-SEED G1 clips at 50 Hz
+  (51,915,358 frames, 93.3 GB), `manifest.json` (which clips the paper's filters
+  keep) and the conversion / filter logs.
 - `runs/lafan_supermimic/<timestamp>[_<tag>]/`: one training run each.
   `params/env.yaml`, `params/agent.yaml` (full configs; `env.yaml` records the
   library's paths), `git/` (diff of the code it ran), `metrics.csv` (one row per
@@ -125,6 +130,26 @@ fallAndGetUp3_subject1 and fallAndGetUp2_subject2).
 Runs trained before the data moved record the old absolute clip paths in
 `params/env.yaml`; `train_library.py` and `render_viser_supermimic.py` then take
 the clips from `$MJLAB_DATA/motions_lafan/` by file name and say so.
+
+Build `motions_seed/` from [BONES-SEED](https://huggingface.co/datasets/bones-studio/seed)
+(`g1.tar.gz` extracted to `<seed>/g1/csv/<date>/<filename>.csv`, 120 fps, root in cm and
+Euler degrees, joints in degrees), then filter it:
+
+```bash
+$PY tools/convert_seed.py <seed>/g1/csv --workers 96   # ~1 min on 96 cores
+$PY tools/filter_seed.py <seed> --workers 96           # ~1 min, writes manifest.json
+```
+
+`convert_seed.py` writes the same npz as `csv_to_npz` (same resampling, velocities and
+body states) in float64 numpy and CPU MuJoCo kinematics instead of a simulation per
+clip. On 6 test clips its resampling matches `csv_to_npz`'s run in float64 to 1e-14,
+and its body states match `csv_to_npz`'s to 2e-6 m from the same resampled states; end
+to end the two differ by up to ~1e-3 because `csv_to_npz` interpolates in float32 and
+its slerp holds the earlier frame when the root turns less than ~0.1° per 120 Hz frame. `manifest.json` gives, per clip,
+`kept`, the `reasons` it was removed and its length; the name filter is SONIC's 40
+keywords plus "50cm" and "look_over_fence", the floating-feet gate is
+SuperMimic-Reproduced's (the paper gives none). Result: 142,220 -> 129,691 after the
+name filter -> 129,581 kept (paper 129,667 -> 129,514), 47,386,831 frames (263.3 h).
 
 ## Commands
 
