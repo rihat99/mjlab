@@ -56,14 +56,16 @@ def read_metrics(path: Path) -> dict[str, np.ndarray]:
 def read_evals(run_dir: Path) -> list[dict]:
   """The ``eval_library_model_<it>.json`` contents, sorted by checkpoint iteration.
 
-  Each gets the key ``iteration``.
+  Each gets the key ``iteration``. Diagnostic variants
+  (``eval_library_model_<it>_<variant>.json``) are skipped.
   """
   evals = []
   for path in run_dir.glob("eval_library_model_*.json"):
+    match = EVAL_NAME.fullmatch(path.name)
+    if match is None:
+      continue
     with open(path) as handle:
       evaluation = json.load(handle)
-    match = EVAL_NAME.fullmatch(path.name)
-    assert match is not None, path
     evaluation["iteration"] = int(match.group(1))
     evals.append(evaluation)
   return sorted(evals, key=lambda evaluation: evaluation["iteration"])

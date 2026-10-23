@@ -151,6 +151,17 @@ training library; writes `eval_library_model_<it>.json` next to it:
 $PY tools/train_library.py --eval --gpu 0 [--run-dir RUN | --checkpoint RUN/model_14000.pt]
 ```
 
+Each clip record holds the fired termination (`fired`: `anchor_pos` = height test,
+`anchor_ori` = tilt test, at frame `steps`) and the return per reward term. Diagnostic
+flags go after `--`, with `--output-json RUN/eval_library_model_<it>_<variant>.json`
+so the default JSON is kept: `--anchor-body torso_link` (needed for the 14k runs
+below, trained with that anchor), `--fall-body pelvis` (fall test on another body),
+`--self-collision False`, `--rollouts-per-clip 8` (per-clip failure fraction in
+`clip_failure_fraction`), `--train-noise True` (training observation and reset
+noise). A single rollout is not reproducible: the GPU simulation is not bitwise
+deterministic and the policy amplifies the difference, so the same checkpoint can
+fail 4 or 7 clips; count failures over several rollouts per clip.
+
 Play one clip headless and record `RUN/videos/play/rl-video-step-0.mp4` (one clip
 pass by default):
 

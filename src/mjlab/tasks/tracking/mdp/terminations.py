@@ -23,21 +23,42 @@ def bad_anchor_pos(
 
 
 def bad_anchor_pos_z_only(
-  env: ManagerBasedRlEnv, command_name: str, threshold: float
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  threshold: float,
+  body_name: str | None = None,
 ) -> torch.Tensor:
+  """Height error of the anchor, or of ``body_name`` (a motion body), > threshold."""
   command = cast(MotionCommand, env.command_manager.get_term(command_name))
-  error = kernels.anchor_height_error(command.robot_anchor_pos_w, command.anchor_pos_w)
+  if body_name is None:
+    robot_pos_w, ref_pos_w = command.robot_anchor_pos_w, command.anchor_pos_w
+  else:
+    body = command.cfg.body_names.index(body_name)
+    robot_pos_w = command.robot_body_pos_w[:, body]
+    ref_pos_w = command.body_pos_w[:, body]
+  error = kernels.anchor_height_error(robot_pos_w, ref_pos_w)
   return error > threshold
 
 
 def bad_anchor_ori(
-  env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg, command_name: str, threshold: float
+  env: ManagerBasedRlEnv,
+  asset_cfg: SceneEntityCfg,
+  command_name: str,
+  threshold: float,
+  body_name: str | None = None,
 ) -> torch.Tensor:
+  """Tilt error of the anchor, or of ``body_name`` (a motion body), > threshold."""
   # Gravity is the fixed -z axis (EntityData.gravity_vec_w); asset_cfg stays in the
   # signature so existing cfgs keep working.
   del asset_cfg
   command = cast(MotionCommand, env.command_manager.get_term(command_name))
-  error = kernels.anchor_tilt_error(command.robot_anchor_quat_w, command.anchor_quat_w)
+  if body_name is None:
+    robot_quat_w, ref_quat_w = command.robot_anchor_quat_w, command.anchor_quat_w
+  else:
+    body = command.cfg.body_names.index(body_name)
+    robot_quat_w = command.robot_body_quat_w[:, body]
+    ref_quat_w = command.body_quat_w[:, body]
+  error = kernels.anchor_tilt_error(robot_quat_w, ref_quat_w)
   return error > threshold
 
 

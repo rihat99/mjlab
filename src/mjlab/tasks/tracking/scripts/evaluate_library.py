@@ -10,6 +10,12 @@ per-survived-step normalised return divides by the steps the episode lasted inst
 (the metric of CuboiLeo/SuperMimic-Reproduced); both are equal on a clip that did not
 fail.
 
+Each clip record also holds the terminations that fired (``fired``; the clip's
+``steps`` is then the frame they fired at) and the return split by reward term
+(``reward_terms``). Diagnostic variants: another anchor body (old checkpoints), the
+fall test on another body, self-collisions off, several rollouts per clip with the
+training-time observation and reset noise.
+
   python -m mjlab.tasks.tracking.scripts.evaluate_library <task> \
     --checkpoint-file <run>/model_4000.pt --motion-files "('a.npz', 'b.npz')"
 """
@@ -19,7 +25,7 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Callable, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -30,7 +36,11 @@ from tensordict import TensorDict
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
-from mjlab.tasks.tracking.mdp import MotionCommandCfg
+from mjlab.tasks.tracking.mdp import (
+  MotionCommandCfg,
+  bad_anchor_ori,
+  bad_anchor_pos_z_only,
+)
 from mjlab.tasks.tracking.mdp.commands import MotionCommand
 from mjlab.utils.torch import configure_torch_backends
 
@@ -48,6 +58,20 @@ class EvaluateLibraryConfig:
   output_json: str | None = None
   """Path of the results JSON. Defaults to 'eval_library_<checkpoint stem>.json'
   next to the checkpoint."""
+  anchor_body: str | None = None
+  """Motion anchor body (goal observation, anchor rewards, relative body targets).
+  Defaults to the task cfg's; a checkpoint needs the anchor it was trained with
+  ('torso_link' for SuperMimic runs before the cfg moved to 'pelvis')."""
+  fall_body: str | None = None
+  """Motion body of the fall test (height and tilt terminations). Defaults to the
+  anchor body."""
+  self_collision: bool = True
+  """False zeroes the robot geoms' contype: no self-contacts, ground contacts stay."""
+  rollouts_per_clip: int = 1
+  """Rollouts of each clip, run in parallel (env i plays clip i mod clips)."""
+  train_noise: bool = False
+  """Training-time observation noise and reset noise (root pose and velocity, joint
+  positions); the other play settings stay."""
 
 
 def make_library_env(
@@ -55,17 +79,45 @@ def make_library_env(
   motion_files: Sequence[str],
   device: str,
   clip_actions: float | None = None,
+  anchor_body: str | None = None,
+  fall_body: str | None = None,
+  self_collision: bool = True,
+  rollouts_per_clip: int = 1,
+  train_noise: bool = False,
 ) -> RslRlVecEnvWrapper:
-  """Play-cfg env of ``task_id`` with one env per motion file, env i on clip i."""
+  """Play-cfg env of ``task_id``, ``rollouts_per_clip`` envs per motion file, env i
+  on clip i mod clips. The other arguments are those of ``EvaluateLibraryConfig``.
+  """
   env_cfg = load_env_cfg(task_id, play=True)
   motion_cmd = env_cfg.commands.get("motion")
   if not isinstance(motion_cmd, MotionCommandCfg):
     raise ValueError(f"Task {task_id} is not a tracking task.")
   if "motion_end" not in env_cfg.terminations:
     raise ValueError(f"Task {task_id} has no 'motion_end' termination.")
+  for body in (anchor_body, fall_body):
+    if body is not None and body not in motion_cmd.body_names:
+      raise ValueError(f"{body!r} is not a motion body: {motion_cmd.body_names}.")
   motion_cmd.motion_file = tuple(motion_files)
   motion_cmd.sampling_mode = "start"
-  env_cfg.scene.num_envs = len(motion_files)
+  if anchor_body is not None:
+    motion_cmd.anchor_body_name = anchor_body
+  if fall_body is not None:
+    for term in env_cfg.terminations.values():
+      if term.func in (bad_anchor_pos_z_only, bad_anchor_ori):
+        term.params["body_name"] = fall_body
+  if not self_collision:
+    robot = env_cfg.scene.entities[motion_cmd.entity_name]
+    robot.collisions = tuple(replace(c, contype=0) for c in robot.collisions)
+  if train_noise:
+    train_cfg = load_env_cfg(task_id, play=False)
+    train_cmd = train_cfg.commands["motion"]
+    assert isinstance(train_cmd, MotionCommandCfg)
+    motion_cmd.pose_range = train_cmd.pose_range
+    motion_cmd.velocity_range = train_cmd.velocity_range
+    motion_cmd.joint_position_range = train_cmd.joint_position_range
+    for name, group in env_cfg.observations.items():
+      group.enable_corruption = train_cfg.observations[name].enable_corruption
+  env_cfg.scene.num_envs = len(motion_files) * rollouts_per_clip
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
   return RslRlVecEnvWrapper(env, clip_actions=clip_actions)
 
@@ -73,27 +125,42 @@ def make_library_env(
 def evaluate_library(
   env: RslRlVecEnvWrapper, policy: Callable[[TensorDict], torch.Tensor]
 ) -> dict[str, Any]:
-  """Run each env once through its clip; return per-clip and aggregate results.
+  """Run each env once through its clip; return per-rollout and aggregate results.
 
   ``env`` comes from ``make_library_env``; ``policy`` maps the observation TensorDict
-  to actions (e.g. a runner's ``get_inference_policy()``).
+  to actions (e.g. a runner's ``get_inference_policy()``). Aggregates are over all
+  rollouts (each clip has the same number); ``num_failed`` counts failed rollouts.
   """
   unwrapped = env.unwrapped
   command = cast(MotionCommand, unwrapped.command_manager.get_term("motion"))
   motion = command.motion
   num_clips = len(motion.clip_names)
-  if env.num_envs != num_clips:
-    raise ValueError(f"Need one env per clip: {env.num_envs} envs, {num_clips} clips.")
+  num_envs = env.num_envs
+  if num_envs % num_clips:
+    raise ValueError(
+      f"Need the same envs per clip: {num_envs} envs, {num_clips} clips."
+    )
   # Largest reward of one step: all tracking terms at 1, penalties at 0.
   max_step_reward = unwrapped.step_dt * sum(
     term.weight for term in unwrapped.cfg.rewards.values() if term.weight > 0
   )
 
+  rewards = unwrapped.reward_manager
+  terminations = unwrapped.termination_manager
+  fall_terms = [
+    name
+    for name in terminations.active_terms
+    if not terminations.get_term_cfg(name).time_out
+  ]
+
   device = env.device
-  total_reward = torch.zeros(num_clips, device=device)
-  steps = torch.zeros(num_clips, dtype=torch.long, device=device)
-  done = torch.zeros(num_clips, dtype=torch.bool, device=device)
-  failed = torch.zeros(num_clips, dtype=torch.bool, device=device)
+  clip = torch.arange(num_envs, device=device) % num_clips  # As MotionCommand.
+  total_reward = torch.zeros(num_envs, device=device)
+  term_reward = torch.zeros(num_envs, len(rewards.active_terms), device=device)
+  steps = torch.zeros(num_envs, dtype=torch.long, device=device)
+  done = torch.zeros(num_envs, dtype=torch.bool, device=device)
+  failed = torch.zeros(num_envs, dtype=torch.bool, device=device)
+  fired = torch.zeros(num_envs, len(fall_terms), dtype=torch.bool, device=device)
 
   obs, _ = env.reset()
   while not done.all():
@@ -102,34 +169,54 @@ def evaluate_library(
     obs, reward, dones, _ = env.step(actions)
     active = ~done
     total_reward += torch.where(active, reward, 0.0)
+    # Per-term reward rates of this step (scaled by dt as the reward is).
+    step_terms = rewards._step_reward * unwrapped.step_dt
+    term_reward += torch.where(active[:, None], step_terms, 0.0)
     steps += active.long()
     newly_done = dones.bool() & active
-    failed |= newly_done & unwrapped.termination_manager.terminated
+    newly_failed = newly_done & terminations.terminated
+    failed |= newly_failed
+    fall_flags = torch.stack([terminations.get_term(name) for name in fall_terms], 1)
+    fired |= newly_failed[:, None] & fall_flags
     done |= newly_done
     if newly_done.any():
       print(
-        f"[INFO] {int(done.sum())}/{num_clips} clips done (step {int(steps.max())})"
+        f"[INFO] {int(done.sum())}/{num_envs} rollouts done (step {int(steps.max())})"
       )
 
-  frames = motion.clip_end - motion.clip_start
+  frames = (motion.clip_end - motion.clip_start)[clip]
   max_return = max_step_reward * (frames - 1)
   normalized = total_reward / max_return
   survived = total_reward / (max_step_reward * steps)
   clips = [
     {
-      "clip": name,
-      "frames": int(frames[c]),
-      "steps": int(steps[c]),
-      "return": float(total_reward[c]),
-      "normalized_return": float(normalized[c]),
-      "normalized_return_survived": float(survived[c]),
-      "failed": bool(failed[c]),
+      "clip": motion.clip_names[c],
+      "rollout": i // num_clips,
+      "frames": int(frames[i]),
+      "steps": int(steps[i]),
+      "return": float(total_reward[i]),
+      "normalized_return": float(normalized[i]),
+      "normalized_return_survived": float(survived[i]),
+      "failed": bool(failed[i]),
+      "fired": [
+        name for name, hit in zip(fall_terms, fired[i].tolist(), strict=True) if hit
+      ],
+      "reward_terms": dict(
+        zip(rewards.active_terms, term_reward[i].tolist(), strict=True)
+      ),
     }
-    for c, name in enumerate(motion.clip_names)
+    for i, c in enumerate(clip.tolist())
   ]
+  failure_fraction = torch.zeros(num_clips, device=device).index_add_(
+    0, clip, failed.float()
+  ) / (num_envs // num_clips)
   return {
     "num_clips": num_clips,
+    "rollouts_per_clip": num_envs // num_clips,
     "num_failed": int(failed.sum()),
+    "clip_failure_fraction": dict(
+      zip(motion.clip_names, failure_fraction.tolist(), strict=True)
+    ),
     "mean_normalized_return": float(normalized.mean()),
     "frame_weighted_normalized_return": float(total_reward.sum() / max_return.sum()),
     "mean_normalized_return_survived": float(survived.mean()),
@@ -151,7 +238,17 @@ def run_evaluate_library(task_id: str, cfg: EvaluateLibraryConfig) -> dict[str, 
       raise FileNotFoundError(f"File not found: {path}")
 
   agent_cfg = load_rl_cfg(task_id)
-  env = make_library_env(task_id, cfg.motion_files, device, agent_cfg.clip_actions)
+  env = make_library_env(
+    task_id,
+    cfg.motion_files,
+    device,
+    agent_cfg.clip_actions,
+    anchor_body=cfg.anchor_body,
+    fall_body=cfg.fall_body,
+    self_collision=cfg.self_collision,
+    rollouts_per_clip=cfg.rollouts_per_clip,
+    train_noise=cfg.train_noise,
+  )
   runner_cls = load_runner_cls(task_id) or MjlabOnPolicyRunner
   runner = runner_cls(env, asdict(agent_cfg), device=device)
   runner.load(
@@ -160,10 +257,16 @@ def run_evaluate_library(task_id: str, cfg: EvaluateLibraryConfig) -> dict[str, 
   policy = runner.get_inference_policy(device=device)
 
   result = evaluate_library(env, policy)
+  command = cast(MotionCommand, env.unwrapped.command_manager.get_term("motion"))
+  anchor_body = command.cfg.anchor_body_name
   result["provenance"] = {
     "task": task_id,
     "checkpoint_file": str(checkpoint.resolve()),
     "motion_files": [str(Path(f).resolve()) for f in cfg.motion_files],
+    "anchor_body": anchor_body,
+    "fall_body": cfg.fall_body or anchor_body,
+    "self_collision": cfg.self_collision,
+    "train_noise": cfg.train_noise,
   }
   output = Path(
     cfg.output_json or checkpoint.with_name(f"eval_library_{checkpoint.stem}.json")
@@ -176,8 +279,14 @@ def run_evaluate_library(task_id: str, cfg: EvaluateLibraryConfig) -> dict[str, 
     f"{result['frame_weighted_normalized_return']:.4f}; per survived step: mean "
     f"{result['mean_normalized_return_survived']:.4f}, frame-weighted "
     f"{result['frame_weighted_normalized_return_survived']:.4f}; "
-    f"failed {result['num_failed']}/{result['num_clips']}; saved {output}"
+    f"failed {result['num_failed']}/{len(result['clips'])}; saved {output}"
   )
+  for record in result["clips"]:
+    if record["failed"]:
+      print(
+        f"[INFO] failed: {record['clip']} rollout {record['rollout']} at frame "
+        f"{record['steps']}: {', '.join(record['fired'])}"
+      )
   env.close()
   return result
 
