@@ -165,6 +165,9 @@ def unitree_g1_flat_tracking_supermimic_env_cfg(
 
   motion_cmd = cfg.commands["motion"]
   assert isinstance(motion_cmd, MotionCommandCfg)
+  # Paper App. A: termination, the anchor rewards and the relative body targets use
+  # the root (pelvis), not BeyondMimic's torso_link.
+  motion_cmd.anchor_body_name = "pelvis"
   if play:
     # Paper App. F.1 evaluation: friction 1.0, no randomization, no reset noise.
     cfg.events.pop("base_com")

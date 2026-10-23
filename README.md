@@ -194,7 +194,9 @@ exec ~/.cache/ms-playwright/chromium_headless_shell-<version>/chrome-headless-sh
 learned termination head). sim = training normalised return in the simulator;
 imagined = imagined reward normalised by its maximum; eval = library evaluation of
 the checkpoint, normalised by clip length ("clip", penalises an early fall) and by
-survived steps ("survived").
+survived steps ("survived"). These runs used BeyondMimic's ``torso_link`` as the
+anchor body for termination, anchor rewards and relative body targets; the config
+now uses the paper's root (``pelvis``), so later runs are not directly comparable.
 
 | iteration | sim | imagined | eval clip | eval survived | failed clips |
 |---|---|---|---|---|---|
@@ -239,8 +241,9 @@ the compile bug, speed, comparison with the colleague's run, local task notes ou
 - Ablation suggested by the gradient diagnostic, not run: the critic-bootstrap term
   alone collapsed the policy, reward-only improved more than the full objective over
   25 updates.
-- Untested design decisions (only confounded runs): pelvis vs torso anchor, raw-metre
-  goal scaling, critic error features.
+- Untested design decisions (only confounded runs): raw-metre goal scaling, critic
+  error features. The anchor moved from torso to pelvis after the 14k runs; its
+  effect is not measured yet.
 - Training episodes terminate about ten times more often than in the colleague's
   run; evaluation failures are single rollouts per clip and change between
   checkpoints (2–7). Align the fall criterion and average a few rollouts per clip
