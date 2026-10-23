@@ -15,7 +15,8 @@ evaluations:
   (solid) and per survived step (dashed, when the JSON has it), and number of failed
   clips, vs checkpoint iteration;
 - ``per_clip_eval.png``: heatmap clips (rows, sorted by name) x checkpoints (columns)
-  of the normalised return, a black cross on the cells of failed clips.
+  of the normalised return, a black cross on the cells of failed clips; for a library
+  of more than 60 clips only the 60 with the lowest return at the last checkpoint.
 
 The run directory is only read, so it can be called on a run that is still training.
 
@@ -38,6 +39,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 DPI = 150
+MAX_HEATMAP_CLIPS = 60
 EVAL_NAME = re.compile(r"eval_library_model_(\d+)\.json")
 
 
@@ -297,16 +299,24 @@ def plot_library_eval(evals: list[dict], out_path: Path, title: str) -> None:
 def plot_per_clip_eval(evals: list[dict], out_path: Path, title: str) -> None:
   """Heatmap clips (rows, by name) x checkpoints (columns) of the normalised return.
 
-  Crosses mark failed clips.
+  Crosses mark failed clips. Large libraries: the ``MAX_HEATMAP_CLIPS`` clips with the
+  lowest return at the last checkpoint.
   """
   clips = sorted({clip["clip"] for evaluation in evals for clip in evaluation["clips"]})
+  if len(clips) > MAX_HEATMAP_CLIPS:
+    last = sorted(evals[-1]["clips"], key=lambda clip: clip["normalized_return"])
+    title += (
+      f"\n{MAX_HEATMAP_CLIPS} lowest of {len(clips)} clips at the last checkpoint"
+    )
+    clips = sorted(clip["clip"] for clip in last[:MAX_HEATMAP_CLIPS])
   row_of = {name: row for row, name in enumerate(clips)}
   returns = np.full((len(clips), len(evals)), np.nan)
   failed = np.zeros((len(clips), len(evals)), dtype=bool)
   for column, evaluation in enumerate(evals):
     for clip in evaluation["clips"]:
-      returns[row_of[clip["clip"]], column] = clip["normalized_return"]
-      failed[row_of[clip["clip"]], column] = clip["failed"]
+      if clip["clip"] in row_of:
+        returns[row_of[clip["clip"]], column] = clip["normalized_return"]
+        failed[row_of[clip["clip"]], column] = clip["failed"]
 
   fig, ax = plt.subplots(figsize=(3.0 + 1.1 * len(evals), 1.5 + 0.3 * len(clips)))
   image = ax.imshow(returns, aspect="auto", cmap="viridis", vmin=0, vmax=1)

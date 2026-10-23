@@ -1,18 +1,24 @@
 """Train, play or evaluate one SuperMimic tracker on a motion library, fully local.
 
-Train on the library = every npz of <motions-dir> (sorted), or the ``--clips``
+Train on the library = the kept clips of <motions-dir>/manifest.json if there is one
+(tools/filter_seed.py), else every npz of <motions-dir> (sorted), or the ``--clips``
 subset. Run dir <log-root>/<timestamp>[_<tag>]/ holding params/, TensorBoard events,
-metrics.csv, curves.png and model_<it>.pt (every 4000 iterations and at the end);
-params/env.yaml records the motion paths. The library itself is recorded once in
-<log-root>/library_<sha256 of the sorted path list>[:12].txt, in ``sha256sum`` format
+metrics.csv, curves.png and model_<it>.pt (every 4000 iterations and at the end).
+The motion paths go to mjlab as a list file, <log-root>/library_<sha256 of the sorted
+path list>[:12]_files.txt (one path per line; a tuple literal of 129k paths would
+exceed the argument size limit), which params/env.yaml records. The library itself is
+recorded once in <log-root>/library_<same hash>.txt, in ``sha256sum`` format
 (``sha256sum -c`` re-checks the files); training refuses to start if that record
 exists but the files have changed since:
 
     PY=<worktree>/.venv/bin/python
     $PY tools/train_library.py --iters 14000 --tag first [--clips walk1_subject1,...]
+    $PY tools/train_library.py --iters 40 --motions-dir $MJLAB_DATA/motions_seed \\
+        --log-root $MJLAB_DATA/runs/seed_supermimic
 
-Evaluate: the paper's library protocol (each clip once from frame 0, one env per
-clip) on the run's training library -> <run dir>/eval_library_model_<it>.json, and a
+Evaluate: the paper's library protocol (each clip once from frame 0, in waves of at
+most --num-envs clips) on the run's training library ->
+<run dir>/eval_library_model_<it>.json, and a
 one-line summary (normalised return per clip length and per survived step, each as
 mean over clips and frame-weighted; failed clips). Play headless (no viewer): one
 clip of the run's library, records <run dir>/videos/play/rl-video-step-0.mp4
@@ -37,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -47,6 +54,8 @@ from typing import Any
 import numpy as np
 import yaml
 from paths import LOG_ROOT, MOTIONS_DIR
+
+from mjlab.tasks.tracking.mdp.commands import expand_motion_files
 
 TASK = "Mjlab-Tracking-Flat-Unitree-G1-SuperMimic"
 
@@ -98,12 +107,33 @@ def write_library_record(motions: list[Path], record: Path) -> None:
   os.replace(tmp_path, record)
 
 
-def tuple_literal(paths: list[Path] | list[str]) -> str:
-  """Python tuple literal of ``paths`` for mjlab's tyro CLI.
+def library_list(motions: list[Path], log_root: Path) -> Path:
+  """``<log_root>/library_<hash>_files.txt``, the hash of ``library_record``."""
+  record = library_record(motions, log_root)
+  return record.with_name(f"{record.stem}_files.txt")
 
-  Double-quoted, so that the printed command copy-pastes.
-  """
-  return "(" + ", ".join(f'"{path}"' for path in paths) + ",)"
+
+def write_library_list(motions: list[Path], path: Path) -> None:
+  """Write ``motions`` to ``path``, one per line, unless it exists (mjlab's
+  ``motion_file`` takes the list in place of a tuple of paths)."""
+  if path.exists():
+    return
+  path.parent.mkdir(parents=True, exist_ok=True)
+  tmp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+  tmp_path.write_text("".join(f"{motion}\n" for motion in motions))
+  tmp_path.chmod(0o444)
+  os.replace(tmp_path, path)
+
+
+def kept_clips(motions_dir: Path) -> list[Path]:
+  """The kept clips of ``<motions_dir>/manifest.json``, else every npz (sorted)."""
+  manifest = motions_dir / "manifest.json"
+  if not manifest.is_file():
+    return sorted(motions_dir.glob("*.npz"))
+  clips = json.loads(manifest.read_text())["clips"]
+  return sorted(
+    motions_dir / f"{name}.npz" for name, clip in clips.items() if clip["kept"]
+  )
 
 
 def latest_checkpoint(run_dir: Path) -> Path:
@@ -139,8 +169,7 @@ def run_library(run_dir: Path, motions_dir: Path) -> list[Path]:
     (run_dir / "params" / "env.yaml").read_text(), Loader=ParamsLoader
   )
   recorded = env_cfg["commands"]["motion"]["motion_file"]
-  recorded = [recorded] if isinstance(recorded, str) else recorded
-  library = [Path(path) for path in recorded]
+  library = [Path(path) for path in expand_motion_files(recorded)]
   moved = [path for path in library if not path.is_file()]
   if moved:
     print(
@@ -172,7 +201,7 @@ def main() -> None:
     "--num-envs",
     type=int,
     default=4096,
-    help="training envs (eval: one per clip, play: 1)",
+    help="training envs (eval: clips played at once, play: 1)",
   )
   parser.add_argument("--tag", default="", help="suffix of the run dir name")
   parser.add_argument(
@@ -205,21 +234,23 @@ def main() -> None:
     if args.iters is None:
       parser.error("training needs --iters")
     if args.clips is None:
-      motions = sorted(motions_dir.glob("*.npz"))
+      motions = kept_clips(motions_dir)
     else:
       motions = sorted(motions_dir / f"{clip}.npz" for clip in args.clips.split(","))
     missing = [str(path) for path in motions if not path.is_file()]
     if not motions or missing:
       parser.error(f"no motions in {motions_dir} or missing: {missing}")
     record = library_record(motions, args.log_root)
+    motion_list = library_list(motions, args.log_root)
     if not args.print_cmd:
       write_library_record(motions, record)
+      write_library_list(motions, motion_list)
     # mjlab writes runs to <--log-root>/<experiment-name>/<timestamp>[_<run-name>].
     command = [
       str(bin_dir / "train"),
       args.task,
       "--env.commands.motion.motion-file",
-      tuple_literal(motions),
+      str(motion_list),
       "--env.scene.num-envs",
       str(args.num_envs),
       "--agent.max-iterations",
@@ -242,6 +273,10 @@ def main() -> None:
     checkpoint = resolve_checkpoint(args).resolve()
     library = run_library(checkpoint.parent, motions_dir)
     if args.eval:
+      # The list goes next to the run's own library files (<run log root>).
+      motion_list = library_list(library, checkpoint.parent.parent)
+      if not args.print_cmd:
+        write_library_list(library, motion_list)
       command = [
         sys.executable,
         "-m",
@@ -250,7 +285,9 @@ def main() -> None:
         "--checkpoint-file",
         str(checkpoint),
         "--motion-files",
-        tuple_literal(library),
+        str(motion_list),
+        "--num-envs",
+        str(args.num_envs),
       ]
     else:
       clips = {path.stem: path for path in library}

@@ -42,6 +42,19 @@ _STORAGE_DTYPES = {
 }
 
 
+def expand_motion_files(motion_file: str | Sequence[str]) -> list[str]:
+  """The npz paths of ``motion_file``: npz paths, where an entry ending in ``.txt``
+  stands for the npz paths it lists, one per line (libraries too large for argv)."""
+  entries = [motion_file] if isinstance(motion_file, str) else list(motion_file)
+  files = []
+  for entry in entries:
+    if entry.endswith(".txt"):
+      files += [line for line in Path(entry).read_text().splitlines() if line]
+    else:
+      files.append(entry)
+  return files
+
+
 class MotionLoader:
   """One or several 50 Hz reference clips, concatenated along time.
 
@@ -60,7 +73,7 @@ class MotionLoader:
     body_indexes: torch.Tensor,
     device: str = "cpu",
   ) -> None:
-    files = [motion_file] if isinstance(motion_file, str) else list(motion_file)
+    files = expand_motion_files(motion_file)
     if not files:
       raise ValueError("MotionLoader needs at least one motion file.")
     bodies = body_indexes.cpu().numpy()
@@ -120,6 +133,10 @@ class MotionCommand(CommandTerm):
       self.cfg.motion_file, self.body_indexes, device=self.device
     )
     self.time_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+    # sampling_mode "start": env i plays clip start_clip[i] (evaluation sets it).
+    self.start_clip = torch.arange(self.num_envs, device=self.device) % len(
+      self.motion.clip_names
+    )
     self.body_pos_relative_w = torch.zeros(
       self.num_envs, len(cfg.body_names), 3, device=self.device
     )
@@ -335,9 +352,9 @@ class MotionCommand(CommandTerm):
     return torch.minimum(frames.unsqueeze(-1) + offsets, last.unsqueeze(-1))
 
   def assign_clips_from_start(self, env_ids: torch.Tensor) -> None:
-    """Point env ``i`` at the first frame of clip ``i mod C`` (play, evaluation)."""
-    num_clips = len(self.motion.clip_names)
-    self.time_steps[env_ids] = self.motion.clip_start[env_ids % num_clips]
+    """Point env ``i`` at the first frame of clip ``start_clip[i]`` (default ``i mod
+    C``; play, evaluation)."""
+    self.time_steps[env_ids] = self.motion.clip_start[self.start_clip[env_ids]]
 
   def bin_sampling_probabilities(self) -> torch.Tensor:
     """Reset distribution over bins (Nb,) of ``sampling_mode="return"``.
@@ -741,7 +758,8 @@ class MotionCommandCfg(CommandTermCfg):
   # tuple first: with mjlab's tyro flags a single path still parses as a str and
   # "('a.npz', 'b.npz')" as a tuple (the other order parses both as a str).
   motion_file: tuple[str, ...] | str
-  """One npz path, or several concatenated into a motion library."""
+  """One npz path, or several concatenated into a motion library; a ``.txt`` path
+  lists npz paths, one per line (see ``expand_motion_files``)."""
   anchor_body_name: str
   body_names: tuple[str, ...]
   entity_name: str

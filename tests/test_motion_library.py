@@ -296,15 +296,40 @@ def test_evaluate_library_zero_policy(
   """A walking clip (the robot holding still falls behind) and a standing clip."""
   standing = write_g1_motion_npz(tmp_path / "stand.npz", 60, amplitude=0.0, speed=0.0)
   files = (motion_files[1], str(standing))
-  env = make_library_env(TASK_ID, files, get_test_device())
-  try:
 
-    def zero_policy(obs) -> torch.Tensor:
-      return torch.zeros(env.num_envs, env.num_actions, device=env.device)
+  def evaluate(
+    motion_file: tuple[str, ...], num_envs: int | None = None, rollouts: int = 1
+  ) -> dict:
+    env = make_library_env(
+      TASK_ID,
+      motion_file,
+      get_test_device(),
+      rollouts_per_clip=rollouts,
+      num_envs=num_envs,
+    )
+    try:
 
-    result = evaluate_library(env, zero_policy)
-  finally:
-    env.close()
+      def zero_policy(obs) -> torch.Tensor:
+        return torch.zeros(env.num_envs, env.num_actions, device=env.device)
+
+      return evaluate_library(env, zero_policy, rollouts)
+    finally:
+      env.close()
+
+  result = evaluate(files)
+  # 2 rollouts per clip on 3 envs (two waves), from a list file: the same results.
+  listing = tmp_path / "library.txt"
+  listing.write_text("".join(f"{file}\n" for file in files))
+  waves = evaluate((str(listing),), num_envs=3, rollouts=2)
+  assert (result["num_envs"], waves["num_envs"]) == (2, 3)
+  assert [c["rollout"] for c in waves["clips"]] == [0, 0, 1, 1]
+  assert waves["clip_failure_fraction"] == result["clip_failure_fraction"]
+  for item, wave_clip in enumerate(waves["clips"]):
+    clip = dict(result["clips"][item % 2])
+    terms, wave_terms = clip.pop("reward_terms"), wave_clip.pop("reward_terms")
+    assert sum(terms.values()) == pytest.approx(clip["return"], rel=1e-4)
+    assert clip | {"rollout": item // 2} == pytest.approx(wave_clip, rel=1e-4)
+    assert terms == pytest.approx(wave_terms, rel=1e-3, abs=1e-5)
   clips = result["clips"]
   assert [c["clip"] for c in clips] == ["clip1", "stand"]
   assert [c["frames"] for c in clips] == [CLIP_LENGTHS[1], 60]

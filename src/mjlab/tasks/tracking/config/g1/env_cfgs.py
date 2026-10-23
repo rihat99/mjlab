@@ -125,7 +125,8 @@ def unitree_g1_flat_tracking_supermimic_env_cfg(
   projected_gravity, actions] (930, flattened term-major, each term's frames oldest
   first) and ``goal`` = reference frames k_t .. k_t + 9 (670), k_t being the frame
   the next reward is scored against. There is no critic group.
-  ``commands.motion.motion_file`` takes a tuple of npz paths (the clip library).
+  ``commands.motion.motion_file`` takes a tuple of npz paths (the clip library) or a
+  ``.txt`` file listing them.
   The ``terminal_state`` recorder keeps the pre-reset state of auto-reset envs.
 
   Contact physics as in Uni-SuperMimic and supermimic_vibed (the paper leaves it
