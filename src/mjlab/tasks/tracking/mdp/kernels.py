@@ -225,9 +225,9 @@ def anchor_tilt_error(
 
   Gravity is the unit vector -z, as ``EntityData.gravity_vec_w``.
   """
-  gravity_w = anchor_quat_w.new_tensor([0.0, 0.0, -1.0]).expand_as(
-    anchor_quat_w[..., :3]
-  )
+  # Built on the device: new_tensor would copy from the host and wait for the GPU.
+  gravity_w = torch.zeros_like(anchor_quat_w[..., :3])
+  gravity_w[..., 2] = -1.0
   ref_gravity_b = quat_apply_inverse(ref_anchor_quat_w, gravity_w)
   gravity_b = quat_apply_inverse(anchor_quat_w, gravity_w)
   return (ref_gravity_b[..., 2] - gravity_b[..., 2]).abs()

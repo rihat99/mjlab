@@ -15,7 +15,10 @@ if TYPE_CHECKING:
 
 def _get_body_indexes(
   command: MotionCommand, body_names: tuple[str, ...] | None
-) -> list[int]:
+) -> list[int] | slice:
+  # All bodies: a slice, since indexing with a list copies it to the device and syncs.
+  if body_names is None:
+    return slice(None)
   return [
     i
     for i, name in enumerate(command.cfg.body_names)

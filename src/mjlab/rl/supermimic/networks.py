@@ -90,12 +90,24 @@ class MotionPolicy(nn.Module):
 
 
 def _update_in_place(normalizer: EmpiricalNormalization, x: torch.Tensor) -> None:
-  """``normalizer.update(x)``, keeping the storage of its std buffer (rsl_rl assigns a
-  new tensor): CUDA graphs that read the normaliser stay valid."""
-  std = normalizer.get_buffer("_std")
-  normalizer.update(x)
-  std.copy_(normalizer.get_buffer("_std"))
-  normalizer.register_buffer("_std", std)
+  """rsl_rl's ``normalizer.update(x)`` (one process, no ``until``), in place: the std
+  buffer keeps its storage (rsl_rl assigns a new tensor), so CUDA graphs that read the
+  normaliser stay valid, and the batch count is made on the device (rsl_rl copies it
+  from the host, which waits for the GPU)."""
+  if not normalizer.training:
+    return
+  count = normalizer.get_buffer("count")
+  mean = normalizer.get_buffer("_mean")
+  var = normalizer.get_buffer("_var")
+  count_x = torch.full_like(count, x.shape[0])
+  var_x = torch.var(x, dim=0, unbiased=False, keepdim=True)
+  mean_x = torch.mean(x, dim=0, keepdim=True)
+  count += count_x
+  rate = count_x / count
+  delta_mean = mean_x - mean
+  mean += rate * delta_mean
+  var += rate * (var_x - var + delta_mean * (mean_x - mean))
+  normalizer.get_buffer("_std").copy_(torch.sqrt(var))
 
 
 class Critic(nn.Module):

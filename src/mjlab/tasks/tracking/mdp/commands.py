@@ -334,13 +334,14 @@ class MotionCommand(CommandTerm):
       bins: (M,) int64 bin indexes.
       returns: (M,) returns observed from those bins.
     """
+    # No bincount or boolean-mask indexing: both wait for the GPU.
     total = torch.zeros_like(self.bin_returns).index_add_(0, bins, returns)
-    count = torch.bincount(bins, minlength=self.bin_count)
-    seen = count > 0
-    alpha = self.cfg.bin_return_alpha
-    self.bin_returns[seen] = (1 - alpha) * self.bin_returns[seen] + alpha * (
-      total[seen] / count[seen]
+    count = torch.zeros_like(self.bin_returns).index_add_(
+      0, bins, torch.ones_like(returns)
     )
+    alpha = self.cfg.bin_return_alpha
+    update = (1 - alpha) * self.bin_returns + alpha * (total / count.clamp(min=1.0))
+    self.bin_returns.copy_(torch.where(count > 0, update, self.bin_returns))
 
   def update_past_weights(self) -> None:
     """EMA of the softmax distribution; called once per training iteration."""
