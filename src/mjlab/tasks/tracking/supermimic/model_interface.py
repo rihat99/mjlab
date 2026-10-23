@@ -71,6 +71,11 @@ class TrackingModelInterface:
     self._env = env
     command = cast(MotionCommand, env.command_manager.get_term(_COMMAND))
     self._command = command
+    # The learner's CUDA graphs read the motion library. Static, they read it in place;
+    # otherwise every replay copies the whole library into the graph's inputs.
+    for value in vars(command.motion).values():
+      if isinstance(value, torch.Tensor):
+        torch._dynamo.mark_static_address(value)
     robot: Entity = env.scene[command.cfg.entity_name]
     self._robot = robot
     self.device = env.device
