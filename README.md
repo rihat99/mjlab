@@ -203,7 +203,7 @@ RTX PRO 6000 (paper: 0.11 s on an H100).
 
 Runs: `$DATA/runs/lafan_supermimic/2026-10-23_00-33-44_final_learnedhead/` and
 `2026-10-23_00-33-45_final_analyticterm/`. Detailed report (curves, per-clip table,
-the compile bug, speed, comparison with the colleague's run):
+the compile bug, speed, comparison with the colleague's run, local task notes outside this repository):
 `/home/rikhat.akizhanov/better/tracking/BetterRetarget/agent_notes/tasks/2026-10-22_14-35_supermimic/REPORT.md`.
 
 ## Configuration pointers
