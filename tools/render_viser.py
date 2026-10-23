@@ -73,7 +73,7 @@ import time
 from argparse import Namespace
 from contextlib import ExitStack
 from pathlib import Path
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import yaml
@@ -155,6 +155,9 @@ def rollout(clip: str, log_root: Path, run: str | None) -> dict:
   gains in effect and the feet heights."""
   import torch
 
+  from mjlab.envs.mdp.actions import JointGainAction
+  from mjlab.tasks.tracking.mdp.commands import MotionCommand
+
   run_dir = None if run is None else log_root / clip / run
   checkpoint = resolve_checkpoint(
     Namespace(checkpoint=None, run_dir=run_dir, clip=clip, log_root=log_root)
@@ -185,8 +188,9 @@ def rollout(clip: str, log_root: Path, run: str | None) -> dict:
   feet = [robot.body_names.index(name) for name in FEET]
   feet_body_ids = robot.indexing.body_ids[feet].cpu().numpy()
   ref_feet_height = motion_data["body_pos_w"][:, feet, 2]  # (F, 2)
+  command = cast(MotionCommand, env.command_manager.get_term("motion"))
   gain_term = (
-    env.action_manager.get_term("joint_gain")
+    cast(JointGainAction, env.action_manager.get_term("joint_gain"))
     if "joint_gain" in env.action_manager.active_terms
     else None
   )
@@ -216,7 +220,7 @@ def rollout(clip: str, log_root: Path, run: str | None) -> dict:
     if bool(dones[0]):
       terminated.append(step)
     step_qpos.append(sim.data.qpos[0].cpu().numpy().astype(np.float64))
-    motion_frame = int(env.command_manager.get_term("motion").time_steps[0])
+    motion_frame = int(command.time_steps[0])
     sub_frame += [motion_frame] * env.cfg.decimation
     if gain_term is not None:
       ctrl_ids = gain_term.ctrl_ids.cpu().numpy()
@@ -362,7 +366,10 @@ def camera_path(states: dict) -> tuple[np.ndarray, np.ndarray]:
   from the low-passed root x/y."""
   from scipy.signal import butter, filtfilt
 
-  b, a = butter(2, FOLLOW_CUTOFF_HZ, fs=1.0 / states["physics_dt"])
+  b, a = cast(
+    tuple[np.ndarray, np.ndarray],
+    butter(2, FOLLOW_CUTOFF_HZ, fs=1.0 / states["physics_dt"]),
+  )
   xy = filtfilt(b, a, states["sub_qpos"][:, states["free_q_adr"][:2]], axis=0)
   target = np.column_stack([xy, np.full(len(xy), CAMERA_TARGET_HEIGHT_M)])
   return target + CAMERA_DISTANCE_M * view_direction(), target
@@ -421,8 +428,10 @@ def build_scene(
   server or one client)."""
   from mjlab.viewer.viser.scene import MjlabViserScene
 
-  # mjviser edits the model's vis settings.
-  scene = MjlabViserScene(api, copy.deepcopy(model), num_envs=1)
+  # mjviser edits the model's vis settings. It types its server as a ViserServer; the
+  # calls made here (build, add_ghost_mesh, update_from_mjdata, clear) only use the
+  # scene / atomic / flush API that a ClientHandle shares.
+  scene = MjlabViserScene(api, copy.deepcopy(model), num_envs=1)  # pyright: ignore[reportArgumentType]
   # The world stays put; the video camera follows the robot instead.
   scene.camera_tracking_enabled = False
   scene.debug_visualization_enabled = True  # draws the queued ghosts
@@ -528,7 +537,7 @@ class HeadlessBrowser:
     self.client: viser.ClientHandle | None = None
     self._process: subprocess.Popen | None = None
 
-  def __enter__(self) -> Self:
+  def __enter__(self) -> HeadlessBrowser:
     env = dict(os.environ)
     if self.gpu is not None:
       # Chromium's Vulkan takes the first device; Mesa's device-select layer puts the
@@ -592,6 +601,7 @@ class HeadlessBrowser:
   ) -> np.ndarray:
     """Frame (H, W, 3) uint8 seen from ``position`` (3,) towards ``target`` (3,), over
     ``background`` (RGBA)."""
+    assert self.client is not None  # set by __enter__
     fov = np.radians(CAMERA_FOV_DEG)
     # The browser's own camera goes to the same pose: the shadow cascades are fitted
     # to it.
@@ -658,6 +668,7 @@ def render_videos(
     )
     # The client's scene, not the server's: its updates and the render requests then
     # reach the browser in order.
+    assert browser.client is not None  # set by __enter__
     scene = build_scene(browser.client, model)
     previous = frame_at(browser, scene, 0)
     # Meshes load asynchronously in the browser: wait until two renders agree.
@@ -673,6 +684,7 @@ def render_videos(
 
     out_dir = args.out_dir / clip / states["tag"]
     out_dir.mkdir(parents=True, exist_ok=True)
+    realtime_video = slow_video = None  # stay None with --only-stills
     if not args.only_stills:
       kwargs = {"shape": (HEIGHT, WIDTH), "fps": 1.0 / states["step_dt"], "crf": 18}
       realtime_video = stack.enter_context(
@@ -690,7 +702,7 @@ def render_videos(
       realtime = caption(frame, f"{title}   t = {t:4.2f} s", legend)
       if i in stills:
         Image.fromarray(realtime).save(out_dir / f"t{stills[i]:.2f}.png")
-      if args.only_stills:
+      if realtime_video is None or slow_video is None:
         continue
       if (i + 1) % decimation == 0:
         realtime_video.add_image(realtime)

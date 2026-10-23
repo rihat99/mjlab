@@ -57,10 +57,11 @@ import argparse
 import os
 from argparse import Namespace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import yaml
+from numpy.typing import ArrayLike
 from paths import ROLLOUTS_DIR, RUNS_DIR, VIDEOS_DIR
 from render_action_ghost import (
   SLOW_FACTOR,
@@ -90,10 +91,14 @@ PREFIX = "robot/"  # mjlab names the robot's bodies and joints robot/<urdf name>
 def nominal_cfg(cfg: ManagerBasedRlEnvCfg) -> None:
   """Seeded play config without startup randomization or reset joint noise (the
   nominal robot)."""
+  from mjlab.tasks.tracking.mdp import MotionCommandCfg
+
   cfg.seed = SEED
   for name in ("foot_friction", "base_com", "encoder_bias"):
     del cfg.events[name]
-  cfg.commands["motion"].joint_position_range = (0.0, 0.0)
+  motion_cmd = cfg.commands["motion"]
+  assert isinstance(motion_cmd, MotionCommandCfg)
+  motion_cmd.joint_position_range = (0.0, 0.0)
 
 
 def seeded_cfg(cfg: ManagerBasedRlEnvCfg) -> None:
@@ -133,12 +138,12 @@ class SubstepRecorder:
       np.arange(wp_data.naconmax, dtype=np.int32), dtype=int, device=device
     )
     self._contact_out = wp.zeros(
-      wp_data.naconmax, dtype=wp.spatial_vector, device=device
+      wp_data.naconmax, dtype=wp.spatial_vectorf, device=device
     )
     self._limit_type = int(mujoco.mjtConstraint.mjCNSTR_LIMIT_JOINT)
     self.rows: dict[str, list[np.ndarray]] = {}
 
-  def _keep(self, **values: np.ndarray) -> None:
+  def _keep(self, **values: ArrayLike) -> None:
     for key, value in values.items():
       self.rows.setdefault(key, []).append(np.asarray(value))
 
@@ -277,6 +282,8 @@ def render_clip(clip: str, args: Namespace) -> None:
   import mediapy
   import torch
 
+  from mjlab.tasks.tracking.mdp.commands import MotionCommand
+
   checkpoint = resolve_checkpoint(
     Namespace(checkpoint=None, run_dir=None, clip=clip, log_root=args.log_root)
   )
@@ -307,7 +314,7 @@ def render_clip(clip: str, args: Namespace) -> None:
   # BR bodies as indices into the recorded robot bodies.
   sim_body = recorder.body_index[planned.bodies]
   step_dt, decimation = env.step_dt, env.cfg.decimation
-  command = env.command_manager.get_term("motion")
+  command = cast(MotionCommand, env.command_manager.get_term("motion"))
   azimuth = np.radians(env.cfg.viewer.azimuth)
   elevation = np.radians(env.cfg.viewer.elevation)
   # MuJoCo's free camera sits at lookat - distance * forward.
@@ -351,7 +358,7 @@ def render_clip(clip: str, args: Namespace) -> None:
     def draw_arrows(
       visualizer, sim_force=sim_force, sim_cop=sim_cop, plan=plan, br_cop=br_cop
     ) -> None:
-      if plan is not None:
+      if plan is not None and br_cop is not None:
         for force, start in zip(plan[0], br_cop, strict=True):
           arrow(visualizer, start + shift, force, weight, BR_RGBA, BR_WIDTH)
       for body in np.flatnonzero(np.abs(sim_force).sum(1) > 0):
@@ -406,7 +413,9 @@ def render_clip(clip: str, args: Namespace) -> None:
   (args.rollouts_dir / clip).mkdir(parents=True, exist_ok=True)
   np.savez_compressed(
     args.rollouts_dir / clip / f"native{tag}.npz",
-    **recorder.arrays(),
+    # The recorded keys all start with "sub_"; pyright still matches the unpacked
+    # dict against savez_compressed's allow_pickle.
+    **recorder.arrays(),  # pyright: ignore[reportArgumentType]
     step_motion_time=np.array(motion_time),
     step_qpos=np.array(step_qpos),
     step_ctrl=np.array(step_ctrl),

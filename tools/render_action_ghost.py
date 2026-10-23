@@ -50,6 +50,8 @@ from train_tracker import TASK, ParamsLoader, resolve_checkpoint, run_motion_fil
 if TYPE_CHECKING:
   from collections.abc import Callable, Sequence
 
+  from rsl_rl.models import MLPModel
+
   from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
   from mjlab.rl import RslRlVecEnvWrapper
 
@@ -85,7 +87,7 @@ def make_play_env(
   motion: Path,
   edit_cfg: Callable[[ManagerBasedRlEnvCfg], None] | None = None,
   task: str = TASK,
-) -> tuple[RslRlVecEnvWrapper, object]:
+) -> tuple[RslRlVecEnvWrapper, MLPModel]:
   """mjlab play env (1 env, starts at clip frame 0) of ``task`` and the checkpoint's
   deterministic policy, built as play does; ``edit_cfg`` may change the play env config
   before the env is built."""
@@ -93,12 +95,15 @@ def make_play_env(
   from mjlab.envs import ManagerBasedRlEnv
   from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
   from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
+  from mjlab.tasks.tracking.mdp import MotionCommandCfg
   from mjlab.utils.torch import configure_torch_backends
 
   configure_torch_backends()
   env_cfg = load_env_cfg(task, play=True)
   agent_cfg = load_rl_cfg(task)
-  env_cfg.commands["motion"].motion_file = str(motion)
+  motion_cmd = env_cfg.commands["motion"]
+  assert isinstance(motion_cmd, MotionCommandCfg)
+  motion_cmd.motion_file = str(motion)
   env_cfg.scene.num_envs = 1
   if edit_cfg is not None:
     edit_cfg(env_cfg)
@@ -276,7 +281,9 @@ def contact_sheet(
   draw = ImageDraw.Draw(sheet)
   draw.text((8, 6), title, font=ImageFont.load_default(size=18), fill="black")
   for slot, index in enumerate(indices):
-    tile = Image.fromarray(frames[index]).resize((tile_w, tile_h), Image.LANCZOS)
+    tile = Image.fromarray(frames[index]).resize(
+      (tile_w, tile_h), Image.Resampling.LANCZOS
+    )
     x, y = (slot % columns) * tile_w, title_h + (slot // columns) * tile_h
     sheet.paste(tile, (x, y))
     if index in largest:
@@ -295,6 +302,8 @@ def render_clip(clip: str, args: Namespace) -> dict:
   import mediapy
   import torch
 
+  from mjlab.envs.mdp.actions import JointPositionAction
+
   checkpoint = resolve_checkpoint(
     Namespace(checkpoint=None, run_dir=None, clip=clip, log_root=args.log_root)
   )
@@ -311,6 +320,7 @@ def render_clip(clip: str, args: Namespace) -> dict:
   env = vec_env.unwrapped
   robot = env.scene["robot"]
   action_term = env.action_manager.get_term("joint_pos")
+  assert isinstance(action_term, JointPositionAction)
   if action_term.cfg.clip is not None or vec_env.clip_actions is not None:
     raise RuntimeError(
       "action clipping is configured; the target formula below would be incomplete"

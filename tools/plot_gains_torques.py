@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import cast
 
 import matplotlib
 import numpy as np
@@ -119,7 +120,11 @@ def shade_phases(ax: Axes, rollout: Rollout, stills: list[float]) -> None:
     dt = rollout.t[1] - rollout.t[0]
     for start, end in edges.reshape(-1, 2):
       ax.axvspan(
-        rollout.t[start] - dt, rollout.t[end - 1], color=color, alpha=alpha, lw=0
+        float(rollout.t[start] - dt),
+        float(rollout.t[end - 1]),
+        color=color,
+        alpha=alpha,
+        lw=0,
       )
   for still in stills:
     ax.axvline(still, color="k", lw=0.5, alpha=0.6)
@@ -219,7 +224,8 @@ def plot_heatmap(
     )
   fig = plt.figure(figsize=(14, 7.5 * len(maps) + 0.5), layout="constrained")
   # Holds the legend: a figure-level one would overlap the figure's title.
-  panel = fig.subfigures(1, 1)
+  # A 1 x 1 grid squeezes to one SubFigure; matplotlib's stub says ndarray.
+  panel = cast(SubFigure, fig.subfigures(1, 1))
   axes = panel.subplots(
     2 * len(maps), 1, sharex=True, gridspec_kw={"height_ratios": [1, 24] * len(maps)}
   )
@@ -272,7 +278,8 @@ def plot_torques(
 ) -> Path:
   fig = plt.figure(figsize=(15, 7.6), layout="constrained")
   # Holds the legend: a figure-level one would overlap the figure's title.
-  panel = fig.subfigures(1, 1)
+  # A 1 x 1 grid squeezes to one SubFigure; matplotlib's stub says ndarray.
+  panel = cast(SubFigure, fig.subfigures(1, 1))
   axes = panel_grid(panel, 3, rollout, stills, "torque (Nm)")
   for ax, joint in zip(axes.ravel(), PANEL_JOINTS, strict=True):
     column = rollout.column(joint)

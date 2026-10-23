@@ -28,6 +28,7 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import TextIO
 
 from paths import MOTIONS_DIR, QUEUE_DIR, RUNS_DIR, VENV_BIN
 
@@ -85,7 +86,7 @@ def main() -> None:
   # GPU-major interleave, so the first wave spreads evenly over the GPUs.
   free_slots = [gpu for _ in range(args.slots) for gpu in args.gpus]
   # Row index -> (process, gpu, log file).
-  running: dict[int, tuple[subprocess.Popen, str, object]] = {}
+  running: dict[int, tuple[subprocess.Popen, str, TextIO]] = {}
   stopping = False
 
   def request_stop(signum, frame) -> None:
