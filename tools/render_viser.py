@@ -25,7 +25,7 @@ import signal
 import socket
 import subprocess
 import time
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
@@ -88,7 +88,11 @@ def camera_path(states: dict) -> tuple[np.ndarray, np.ndarray]:
   """
   from scipy.signal import butter, filtfilt
 
-  b, a = butter(2, FOLLOW_CUTOFF_HZ, fs=1.0 / states["physics_dt"])
+  # scipy has no type stubs; butter returns (b, a) with its default output="ba".
+  b, a = cast(
+    "tuple[np.ndarray, np.ndarray]",
+    butter(2, FOLLOW_CUTOFF_HZ, fs=1.0 / states["physics_dt"]),
+  )
   xy = filtfilt(b, a, states["sub_qpos"][:, states["free_q_adr"][:2]], axis=0)
   target = np.column_stack([xy, np.full(len(xy), CAMERA_TARGET_HEIGHT_M)])
   return target + CAMERA_DISTANCE_M * view_direction(), target
@@ -156,8 +160,12 @@ def build_scene(
   """
   from mjlab.viewer.viser.scene import MjlabViserScene
 
-  # mjviser edits the model's vis settings.
-  scene = MjlabViserScene(api, copy.deepcopy(model), num_envs=1)
+  # mjviser edits the model's vis settings. MjlabViserScene is annotated for a server;
+  # outside its GUI it uses only ``scene``, ``atomic`` and ``flush``, which a client
+  # has too.
+  scene = MjlabViserScene(
+    cast("viser.ViserServer", api), copy.deepcopy(model), num_envs=1
+  )
   # The world stays put; the video camera follows the robot instead.
   scene.camera_tracking_enabled = False
   scene.debug_visualization_enabled = True  # draws the queued ghosts
@@ -247,7 +255,7 @@ class HeadlessBrowser:
     self.client: viser.ClientHandle | None = None
     self._process: subprocess.Popen | None = None
 
-  def __enter__(self) -> Self:
+  def __enter__(self) -> HeadlessBrowser:
     env = dict(os.environ)
     if self.gpu is not None:
       # Chromium's Vulkan takes the first device; Mesa's device-select layer puts the
@@ -317,6 +325,7 @@ class HeadlessBrowser:
 
     Composited over ``background`` (RGBA).
     """
+    assert self.client is not None, "enter the HeadlessBrowser before render()"
     fov = np.radians(CAMERA_FOV_DEG)
     # The browser's own camera goes to the same pose: the shadow cascades are fitted
     # to it.

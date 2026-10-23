@@ -45,6 +45,7 @@ from argparse import Namespace
 from contextlib import ExitStack
 from dataclasses import asdict
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 from paths import LOG_ROOT, MOTIONS_DIR, VISER_DIR
@@ -65,6 +66,11 @@ from render_viser import (
 )
 from train_library import TASK, resolve_checkpoint, run_library
 
+if TYPE_CHECKING:
+  import viser
+
+  from mjlab.viewer.viser.scene import MjlabViserScene
+
 WINDOW_S = 20.0
 # Blue-grey, deep enough to read at GHOST_OPACITY.
 REFERENCE_RGB, CAPTION_REFERENCE_RGB = (0.12, 0.34, 0.72), (30, 90, 190)
@@ -84,20 +90,23 @@ def rollout(checkpoint: Path, motion: Path) -> dict:
 
   import mjlab.tasks  # noqa: F401 -- registers the tasks
   from mjlab.tasks.registry import load_rl_cfg, load_runner_cls
+  from mjlab.tasks.tracking.mdp.commands import MotionCommand
   from mjlab.tasks.tracking.scripts.evaluate_library import make_library_env
   from mjlab.utils.torch import configure_torch_backends
 
   configure_torch_backends()
   agent_cfg = load_rl_cfg(TASK)
   vec_env = make_library_env(TASK, [str(motion)], "cuda:0", agent_cfg.clip_actions)
-  runner = load_runner_cls(TASK)(vec_env, asdict(agent_cfg), device="cuda:0")
+  runner_cls = load_runner_cls(TASK)
+  assert runner_cls is not None, f"{TASK} registers no runner"
+  runner = runner_cls(vec_env, asdict(agent_cfg), device="cuda:0")
   runner.load(
     str(checkpoint), load_cfg={"actor": True}, strict=True, map_location="cuda:0"
   )
   policy = runner.get_inference_policy(device="cuda:0")
   env = vec_env.unwrapped
   sim, robot = env.sim, env.scene["robot"]
-  command = env.command_manager.get_term("motion")
+  command = cast(MotionCommand, env.command_manager.get_term("motion"))
   if command.cfg.body_names[0] != "pelvis" or robot.body_names[0] != "pelvis":
     raise RuntimeError("expected the pelvis (the free-joint root) as first body")
   # (7,) root position, quaternion wxyz
@@ -189,7 +198,7 @@ def window_states(states: dict, first_frame: int, num_steps: int) -> dict:
 
 
 def render_video(
-  clip: str, states: dict, server: object, args: Namespace, ghost: str
+  clip: str, states: dict, server: viser.ViserServer, args: Namespace, ghost: str
 ) -> None:
   """Render the window's policy-step frames with ``ghost`` (a GHOSTS key).
 
@@ -225,7 +234,7 @@ def render_video(
   else:
     frames = range(decimation - 1, len(states["sub_qpos"]), decimation)
 
-  def show(scene: object, i: int, ghost_opacity: float | None) -> None:
+  def show(scene: MjlabViserScene, i: int, ghost_opacity: float | None) -> None:
     data.qpos[:] = states["sub_qpos"][i]
     mujoco.mj_kinematics(scene.mj_model, data)
     scene.clear()
@@ -233,7 +242,7 @@ def render_video(
       scene.add_ghost_mesh(ghost_qpos[i], ghost_model, alpha=ghost_opacity, label=ghost)
     scene.update_from_mjdata(data)
 
-  def frame_at(browser: HeadlessBrowser, scene: object, i: int) -> np.ndarray:
+  def frame_at(browser: HeadlessBrowser, scene: MjlabViserScene, i: int) -> np.ndarray:
     show(scene, i, None)
     plain = browser.render(positions[i], targets[i], background).astype(np.float32)
     show(scene, i, 1.0)
@@ -245,6 +254,7 @@ def render_video(
     browser = stack.enter_context(
       HeadlessBrowser(server, args.chrome, None if args.software else args.gpu)
     )
+    assert browser.client is not None  # set by __enter__
     scene = build_scene(browser.client, model)
     previous = frame_at(browser, scene, frames[0])
     # Meshes load asynchronously in the browser: wait until two renders agree.
@@ -263,6 +273,7 @@ def render_video(
 
     out_dir = args.out_dir / clip
     out_dir.mkdir(parents=True, exist_ok=True)
+    video = None
     if not args.only_stills:
       video = stack.enter_context(
         mediapy.VideoWriter(
@@ -283,7 +294,7 @@ def render_video(
       )
       if i in stills:
         Image.fromarray(frame).save(out_dir / f"{ghost}_t{stills[i]:.2f}.png")
-      if not args.only_stills:
+      if video is not None:
         video.add_image(frame)
   elapsed = time.monotonic() - start
   print(

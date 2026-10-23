@@ -42,6 +42,7 @@ import re
 import shlex
 import sys
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import yaml
@@ -57,10 +58,12 @@ class ParamsLoader(yaml.SafeLoader):
   """
 
 
-ParamsLoader.add_constructor(
-  "tag:yaml.org,2002:python/tuple",
-  lambda loader, node: loader.construct_sequence(node),
-)
+def construct_tuple(loader: ParamsLoader, node: yaml.SequenceNode) -> list[Any]:
+  """A python/tuple node as a list."""
+  return loader.construct_sequence(node)
+
+
+ParamsLoader.add_constructor("tag:yaml.org,2002:python/tuple", construct_tuple)
 ParamsLoader.add_multi_constructor(
   "tag:yaml.org,2002:python/", lambda loader, suffix, node: None
 )

@@ -62,7 +62,9 @@ def read_evals(run_dir: Path) -> list[dict]:
   for path in run_dir.glob("eval_library_model_*.json"):
     with open(path) as handle:
       evaluation = json.load(handle)
-    evaluation["iteration"] = int(EVAL_NAME.fullmatch(path.name).group(1))
+    match = EVAL_NAME.fullmatch(path.name)
+    assert match is not None, path
+    evaluation["iteration"] = int(match.group(1))
     evals.append(evaluation)
   return sorted(evals, key=lambda evaluation: evaluation["iteration"])
 
@@ -359,7 +361,7 @@ def markdown_table(evals: list[dict]) -> str:
 
 
 def main() -> None:
-  parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+  parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
   parser.add_argument(
     "run_dir",
     type=Path,

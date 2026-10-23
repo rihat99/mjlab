@@ -120,7 +120,7 @@ class SuperMimic:
     self.policy_optimizer = torch.optim.Adam(
       self.policy.parameters(),
       lr=policy_cfg.lr,
-      betas=tuple(policy_cfg.betas),
+      betas=(policy_cfg.betas[0], policy_cfg.betas[1]),
       fused=fused,
     )
     self.critic_optimizer = torch.optim.Adam(

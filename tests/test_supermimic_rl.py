@@ -70,7 +70,7 @@ class _SyntheticInterface:
   state_dim = STATE_DIM
   context_dim = CONTEXT_DIM
   obs_dim = OBS_DIM
-  obs_term_dims = OBS_TERM_DIMS
+  obs_term_dims: tuple[int, ...] = OBS_TERM_DIMS
   goal_dim = GOAL_DIM
   action_dim = NQ
   feature_dim = 10 + 2 * NQ
@@ -147,8 +147,15 @@ class _SyntheticInterface:
       "action_rate": -0.1 * DT * (a - a_prev).square().sum(dim=-1),
     }
 
-  def reward(self, s_next, a, a_prev, frame):
-    return sum(self.reward_terms(s_next, a, a_prev, frame).values())
+  def reward(
+    self,
+    s_next: torch.Tensor,
+    a: torch.Tensor,
+    a_prev: torch.Tensor,
+    frame: torch.Tensor,
+  ) -> torch.Tensor:
+    terms = self.reward_terms(s_next, a, a_prev, frame)
+    return terms["joint"] + terms["height"] + terms["action_rate"]
 
   def termination_hard(self, s_next, frame):
     height_error = s_next[:, 2] - self.env.ref_pos[frame, 2]
@@ -470,6 +477,7 @@ def test_running_world_model_statistics(device):
   prefill = _fill_buffer(env, 40)
   wider = _fill_buffer(env, 40, action_std=3.0)
   actions = slice(env.iface.feature_dim, env.iface.feature_dim + NQ)
+  model = None
   for running in (False, True):
     cfg = replace(wm_cfg, running_statistics=running)
     alg = SuperMimic(env.iface, cfg, policy_cfg, critic_cfg, device)
@@ -494,6 +502,7 @@ def test_running_world_model_statistics(device):
 
   # Moving average: the count is capped at max_count before each update (weight 1/2
   # here), so increments of zero shrink the scale geometrically down to the floor.
+  assert model is not None  # the running-statistics model of the last iteration
   num = 256
   inputs = torch.randn(num, model.input_normalizer.get_buffer("_mean").shape[-1])
   heads = torch.randn(
@@ -552,7 +561,10 @@ def test_policy_bptt_update(device):
   # Frozen modules got no gradient and are trainable again afterwards.
   for module, grads_before in frozen_grads.items():
     for p, g in zip(module.parameters(), grads_before, strict=True):
-      assert (p.grad is None and g is None) or torch.equal(p.grad, g)
+      if g is None:
+        assert p.grad is None
+      else:
+        assert p.grad is not None and torch.equal(p.grad, g)
       assert p.requires_grad
   horizon, num = policy_cfg.horizon, policy_cfg.num_rollouts
   assert rollout.features.shape == (horizon + 1, num, 10 + 2 * NQ)
