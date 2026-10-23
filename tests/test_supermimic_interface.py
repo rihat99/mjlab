@@ -8,6 +8,7 @@ anchor. A per-substep probe records the stale state so the env's numbers can be
 reproduced exactly; the interface itself scores the reached state s_next.
 """
 
+import os
 from pathlib import Path
 from typing import cast
 
@@ -27,7 +28,13 @@ from mjlab.tasks.tracking.supermimic import TrackingModelInterface
 from mjlab.tasks.tracking.supermimic.recorder import floating_base_state
 
 TASK_ID = "Mjlab-Tracking-Flat-Unitree-G1-SuperMimic"
-LAFAN = Path("/home/rikhat.akizhanov/better/data/retarget_test/mjlab/motions_lafan")
+# Data root as in tools/paths.py: $MJLAB_DATA, default <repo>/../retarget_test/mjlab.
+DATA_ROOT = Path(
+  os.environ.get(
+    "MJLAB_DATA", Path(__file__).resolve().parents[2] / "retarget_test/mjlab"
+  )
+)
+LAFAN = DATA_ROOT / "motions_lafan"
 CLIPS = ("dance1_subject1.npz", "walk1_subject1.npz")
 NUM_ENVS = 8
 NUM_STEPS = 100
@@ -36,7 +43,8 @@ NEAR_END = {0: 0, 1: 1}  # env -> clip
 RELATIVE_TERMS = ("motion_body_pos", "motion_body_ori")
 
 pytestmark = pytest.mark.skipif(
-  not all((LAFAN / clip).is_file() for clip in CLIPS), reason="LAFAN npz not found"
+  not all((LAFAN / clip).is_file() for clip in CLIPS),
+  reason=f"LAFAN npz not found in {LAFAN} (set MJLAB_DATA)",
 )
 
 
