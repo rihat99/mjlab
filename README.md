@@ -60,11 +60,17 @@ The additions are also listed in `docs/source/changelog.rst`.
 ## Install
 
 ```bash
-cd mjlab-supermimic              # this branch's checkout
+git clone -b supermimic https://github.com/rihat99/mjlab.git mjlab-supermimic
+cd mjlab-supermimic
 uv sync --extra cu130            # Python 3.13, torch 2.14 for CUDA 13 (Blackwell)
 PY=$PWD/.venv/bin/python
 DATA=${MJLAB_DATA:-$PWD/../retarget_test/mjlab}
+$PY -m pytest tests/test_supermimic_rl.py tests/test_supermimic_interface.py \
+    tests/test_motion_library.py tests/test_tracking_kernels.py tests/test_tracking_kinematics.py
 ```
+
+`test_supermimic_interface.py` reads clips from `$MJLAB_DATA/motions_lafan/` and skips
+without them.
 
 `--extra cu126` instead for NVIDIA drivers older than 580 (no Blackwell kernels).
 The tools set `CUDA_VISIBLE_DEVICES`, `MUJOCO_EGL_DEVICE_ID`, `MUJOCO_GL=egl` and
@@ -84,7 +90,10 @@ All data lives under one root, `$MJLAB_DATA`, by default
   `model_<it>.pt`, `eval_library_model_<it>.json` (library evaluation of that
   checkpoint), `figures/` (`plot_supermimic_run.py`), `videos/play/` (play).
   `runs/lafan_supermimic/library_<hash>.txt` records the sha256 of every clip of a
-  training library (`sha256sum -c` re-checks it).
+  training library (`sha256sum -c` re-checks it). The record lists absolute clip paths,
+  so records written before the data moved name paths that no longer exist; the 40
+  clips are unchanged (hashes match by file name) and a new record is written for the
+  new paths.
 - `viser/supermimic/<clip>/`: rendered videos, stills and `rollout.npz`.
 
 Clip npz format (read by `MotionLoader` in `mdp/commands.py`; T frames, 30 bodies of
