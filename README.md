@@ -29,15 +29,17 @@ so data collection concentrates on what it cannot track yet.
 - `src/mjlab/tasks/tracking/mdp/kernels.py`, `kinematics.py`: pure tracking kernels
   and a differentiable torch forward kinematics; the env terms delegate to them.
 - `src/mjlab/tasks/tracking/mdp/commands.py`: multi-clip motion library
-  (`motion_file` takes a tuple of npz), return-based reset sampling per clip bin,
-  `motion_end` time-out; `observations.py`: 10-frame future-reference goal.
+  (`motion_file` takes a tuple of npz or a `.txt` file listing them; only the tracked
+  bodies are kept, in float16 except the body positions), return-based reset sampling
+  per clip bin, `motion_end` time-out; `observations.py`: 10-frame future-reference
+  goal.
 - `src/mjlab/tasks/tracking/supermimic/`: `TrackingModelInterface` (observation,
   goal, reward and termination on imagined states) and the terminal-state recorder.
 - Task `Mjlab-Tracking-Flat-Unitree-G1-SuperMimic`
   (`src/mjlab/tasks/tracking/config/g1/`).
 - `src/mjlab/tasks/tracking/scripts/evaluate_library.py`: library evaluation (paper
-  App. F.1: each clip once from frame 0, one env per clip, play config,
-  deterministic policy).
+  App. F.1: each clip once from frame 0, play config, deterministic policy), in waves
+  of at most `--num-envs` clips (default 4096), longest clips first.
 - Shared with the other fork branches: local logging without WandB
   (`src/mjlab/rl/local_log_writer.py`: TensorBoard events, `metrics.csv`,
   `curves.png`), logs finalised on crash or SIGTERM, `csv_to_npz` writing a local
@@ -86,8 +88,8 @@ All data lives under one root, `$MJLAB_DATA`, by default
 - `motions_lafan/<clip>.npz`: the 40 LAFAN1 G1 clips at 50 Hz (441,140 frames,
   2.45 h), with the conversion logs and a README.
 - `motions_seed/<filename>.npz`: all 142,220 BONES-SEED G1 clips at 50 Hz
-  (51,915,358 frames, 93.3 GB), `manifest.json` (which clips the paper's filters
-  keep) and the conversion / filter logs.
+  (51,915,358 frames, 93.3 GB), `manifest.json` (which clips the three filter steps
+  keep: 129,043) and the conversion / filter logs.
 - `runs/lafan_supermimic/<timestamp>[_<tag>]/`: one training run each.
   `params/env.yaml`, `params/agent.yaml` (full configs; `env.yaml` records the
   library's paths), `git/` (diff of the code it ran), `metrics.csv` (one row per
@@ -102,7 +104,9 @@ All data lives under one root, `$MJLAB_DATA`, by default
 - `viser/supermimic/<clip>/`: rendered videos, stills and `rollout.npz`.
 
 Clip npz format (read by `MotionLoader` in `mdp/commands.py`; T frames, 30 bodies of
-the G1, world frame):
+the G1, world frame). `MotionLoader` keeps only the 14 tracked bodies and stores
+everything but the body positions in float16 on the GPU (572 B per frame; the SEED
+kept set takes 25.1 GiB and loads in about 6.6 min):
 
 | key | shape | dtype |
 |---|---|---|
@@ -148,8 +152,19 @@ to end the two differ by up to ~1e-3 because `csv_to_npz` interpolates in float3
 its slerp holds the earlier frame when the root turns less than ~0.1° per 120 Hz frame. `manifest.json` gives, per clip,
 `kept`, the `reasons` it was removed and its length; the name filter is SONIC's 40
 keywords plus "50cm" and "look_over_fence", the floating-feet gate is
-SuperMimic-Reproduced's (the paper gives none). Result: 142,220 -> 129,691 after the
-name filter -> 129,581 kept (paper 129,667 -> 129,514), 47,386,831 frames (263.3 h).
+SuperMimic-Reproduced's (the paper gives none). A third step, ours and not the
+paper's, drops clips in which a joint moves more than 1 rad between two 50 Hz frames
+(retargeting glitches; the same rule as the colleague's SuperMimic-Reproduced pack).
+
+| step | clips | removed |
+|---|---|---|
+| raw | 142,220 | |
+| 1. name filter | 129,691 | 12,529 (paper 12,553) |
+| 2. feasibility filter | 129,581 | 110 (paper 153; paper total 129,514) |
+| 3. joint step > 1 rad | 129,043 | 538 (568 flagged, 30 already removed) |
+
+Kept: 129,043 clips, 47,182,346 frames, 262.1 h. `train_library.py` trains on the kept
+clips of `manifest.json` when the motions dir has one.
 
 ## Commands
 
@@ -177,7 +192,8 @@ goes to mjlab's `train` unchanged; `--clips a,b` trains on a subset; `--print-cm
 only prints the command.
 
 Evaluate a checkpoint (default: the newest run and its last checkpoint) on its
-training library; writes `eval_library_model_<it>.json` next to it:
+training library; writes `eval_library_model_<it>.json` next to it (compact JSON:
+aggregates and one record per rollout; `--num-envs` rollouts at a time):
 
 ```bash
 $PY tools/train_library.py --eval --gpu 0 [--run-dir RUN | --checkpoint RUN/model_14000.pt]
@@ -193,6 +209,19 @@ below, trained with that anchor), `--fall-body pelvis` (fall test on another bod
 noise). A single rollout is not reproducible: the GPU simulation is not bitwise
 deterministic and the policy amplifies the difference, so the same checkpoint can
 fail 4 or 7 clips; count failures over several rollouts per clip.
+
+BONES-SEED: train on the 129,043 kept clips (`--clips a,b` for a subset) and evaluate
+on all of them. The library goes to mjlab as `<log-root>/library_<hash>_files.txt`;
+each launch hashes the 85 GB of clips (~1 min) and loads the library (~6.6–10 min); training takes 0.38 s per iteration at 4096 envs (as on LAFAN) and 49 GB of GPU memory. A
+full evaluation pass at 4096 envs is 32 waves, 19,256 steps (~6 min of simulation at
+17.6 ms per step, plus the load):
+
+```bash
+SEED="--motions-dir $DATA/motions_seed --log-root $DATA/runs/seed_supermimic"
+nohup $PY tools/train_library.py --gpu 0 --iters 320000 --tag seed $SEED \
+    > $DATA/runs/seed_supermimic/train.log 2>&1 &
+$PY tools/train_library.py --eval --gpu 0 $SEED [--run-dir RUN]
+```
 
 Play one clip headless and record `RUN/videos/play/rl-video-step-0.mp4` (one clip
 pass by default):
@@ -357,7 +386,10 @@ fails 0.1 / 0.8 / 2.5 per pass. Both runs take 0.40 s per iteration (median over
   checkpoints (2–7). Align the fall criterion and average a few rollouts per clip
   before the next comparison.
 - Paper budget not run: 320k iterations, about 22 h at 0.25 s.
-- BONES-SEED dataset: not started.
+- BONES-SEED: converted, filtered and smoke-tested (40 iterations); no long run yet.
+  Imagined rollouts start only where all H = 32 frames stay in the clip, so the last
+  32 frames of every clip never seed one: 8.8 % of SEED frames (0.3 % of LAFAN), and
+  the 8 clips shorter than 33 frames none at all.
 - `render_viser_supermimic.py`: the second video rendered in the same process is
   3–10x slower than the first; render one ghost per process (`--ghosts reference`,
   then `--ghosts targets`) when time matters.

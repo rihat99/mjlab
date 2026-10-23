@@ -48,6 +48,11 @@ Changed
   fp16 autocast with a gradient scaler each (``precision.autocast``, default
   ``"fp16"``; ``"none"`` keeps fp32 with TF32). ``tools/check_policy_grad.py``
   compares the compiled learner's gradients with the eager learner's on a checkpoint.
+- The tracking ``MotionLoader`` keeps only the tracked bodies and stores joints,
+  body quaternions and body velocities in float16 (body positions in float32), so
+  that a 47 M-frame library fits on one GPU (25 GiB); ``motion_file`` also takes a
+  ``.txt`` file listing npz paths, and ``evaluate_library`` plays a library larger
+  than ``--num-envs`` in waves.
 - Bumped ``rsl-rl-lib`` from 5.5.0 to 5.5.1. This removes the need for capping
   ``wandb`` below 0.29.
 
