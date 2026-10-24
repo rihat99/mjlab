@@ -64,6 +64,9 @@ class PolicyCfg:
   """Imagined rollouts per policy update."""
   horizon: int = 32
   """Imagination horizon H."""
+  seed_end_margin: int = 0
+  """(choice) Seeds need ``frame + horizon + seed_end_margin < clip_end``: the
+  bootstrap state s_H stays this many frames away from the clip's last frame."""
   gamma: float = 0.99
   """Discount factor (imagination, critic targets and reset-sampler returns)."""
   obs_normalization: bool = True

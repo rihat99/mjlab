@@ -487,7 +487,10 @@ class SuperMimic:
     cfg = self.policy_cfg
     iface = self.iface
     seeds = buffer.sample_seeds(
-      cfg.num_rollouts, cfg.history_length, cfg.horizon, iface.clip_end
+      cfg.num_rollouts,
+      cfg.history_length,
+      cfg.horizon + cfg.seed_end_margin,
+      iface.clip_end,
     )
     env_idx = seeds["env_idx"]
     num = env_idx.shape[0]
