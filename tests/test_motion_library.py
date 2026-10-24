@@ -231,9 +231,13 @@ def test_goal_matches_hand_computation(env: ManagerBasedRlEnv) -> None:
   actions = torch.zeros(NUM_ENVS, env.action_manager.total_action_dim)
   for _ in range(5):
     obs, *_ = env.step(actions.to(env.device))
+  # The default task's goal is the reference layout; the anchor layout's term is
+  # checked below by hand.
+  goal = mdp.motion_future_frames_reference(env, "motion", future_frames=10)
+  assert goal.shape == (NUM_ENVS, 730)
+  torch.testing.assert_close(obs["goal"], goal, atol=0, rtol=0)
   goal = mdp.motion_future_frames_b(env, "motion", future_frames=10)
   assert goal.shape == (NUM_ENVS, 670)
-  torch.testing.assert_close(obs["goal"], goal, atol=0, rtol=0)
 
   # Near its clip end, so the last future frames are clamped.
   env_id = 1
@@ -280,7 +284,7 @@ def test_supermimic_env_builds_and_steps(motion_files: tuple[str, ...]) -> None:
   try:
     obs, _ = env.reset()
     shapes = {k: tuple(cast(torch.Tensor, v).shape) for k, v in obs.items()}
-    assert shapes == {"actor": (4, 930), "goal": (4, 670)}
+    assert shapes == {"actor": (4, 990), "goal": (4, 730)}
     for _ in range(50):
       obs, reward, *_ = env.step(0.3 * torch.randn(4, 29, device=env.device))
       assert torch.isfinite(reward).all()

@@ -168,9 +168,10 @@ class ReplayBuffer:
     Returns:
       s0 (B, S); frame0 (B,) int64; env_idx (B,) int64; state_hist (B, history, S)
       oldest first, ending at s0; prev_action_hist (B, history, A) the action executed
-      before each history state (zeros at episode start), so frame m of the observation
-      history is observation(state_hist[:, m], prev_action_hist[:, m]); a_prev (B, A)
-      the action executed before s0 (= prev_action_hist[:, -1]).
+      before each history state (zeros at episode start) and frame_hist (B, history)
+      the frame shown with it, so frame m of the observation history is
+      observation(state_hist[:, m], prev_action_hist[:, m], frame_hist[:, m]); a_prev
+      (B, A) the action executed before s0 (= prev_action_hist[:, -1]).
     """
 
     def is_valid(age: torch.Tensor, env: torch.Tensor) -> torch.Tensor:
@@ -201,6 +202,7 @@ class ReplayBuffer:
       "env_idx": env,
       "state_hist": self.state[self._rows(hist_age), env_h],
       "prev_action_hist": prev_action_hist,
+      "frame_hist": self.frame[self._rows(hist_age), env_h],
       "a_prev": prev_action_hist[:, -1],
     }
 

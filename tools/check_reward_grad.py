@@ -7,17 +7,20 @@ inputs to the eager and the compiled function and compares the forward values an
 gradients with respect to the inputs, on replay states of a checkpoint's policy and on
 a perturbed copy (root drops, tilts, joint noise: the soft termination is active
 there). Each function runs in fp32 (TF32 off, so that compiled and eager differ only
-in fusion and summation order) and under fp16 autocast as in training (compiled and
-eager both under autocast). The reward is also checked term by term.
+in fusion and summation order) and under bf16 and fp16 autocast (compiled and eager
+both under autocast; training uses bf16 by default). The reward is also checked term
+by term.
 
 Unlike tools/check_policy_grad.py no rollout amplifies the differences, so the bar is
 tight: relative error |compiled - eager| / |eager| (vector norms) of the values and of
-every input gradient below ``--tol``. The exception is the learned head under fp16
-(``--tol-fp16-head``): it is an MLP, and eager autocast rounds every layer output to
-fp16 while the compiled kernels keep fused intermediates in fp32 (~2e-3 apart; 1e-6
-in fp32). Rows also give the norm of each eager input gradient (a zero gradient
-compares as error 0). Exit status 1 when a row exceeds its bar. About 5 minutes on
-one GPU:
+every input gradient below ``--tol``. The exception is the learned head under
+autocast (``--tol-fp16-head``, ``--tol-bf16-head``): it is an MLP, and eager autocast
+rounds every layer output to the autocast dtype while the compiled kernels keep fused
+intermediates in fp32 (~2e-3 apart in fp16, 8x coarser in bf16; 1e-6 in fp32). Rows
+also give the norm of each eager input gradient (a zero gradient compares as error
+0). Exit status 1 when a row exceeds its bar. ``--task`` must be the checkpoint's
+goal layout (``-AnchorGoal`` for checkpoints before 2026-10-24, the default
+checkpoint among them). About 5 minutes on one GPU:
 
     CUDA_VISIBLE_DEVICES=0 MUJOCO_GL=egl .venv/bin/python tools/check_reward_grad.py
 """
@@ -43,10 +46,11 @@ from mjlab.rl.supermimic.runner import SuperMimicRunner
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg
 from mjlab.tasks.tracking.mdp.commands import MotionCommandCfg
 
-TASK = "Mjlab-Tracking-Flat-Unitree-G1-SuperMimic"
+TASK = "Mjlab-Tracking-Flat-Unitree-G1-SuperMimic-AnchorGoal"
 CHECKPOINT = LOG_ROOT / "2026-10-23_21-20-15_uni_env" / "model_14000.pt"
 PARTS = {"actor": True, "critic": True, "world_model": True, "optimizer": True}
 HORIZON = 32  # The termination sees (H, B) features; any split of the batch works.
+PRECISIONS = {"fp32": None, "bf16": torch.bfloat16, "fp16": torch.float16}
 
 
 def log(message: str) -> None:
@@ -65,12 +69,12 @@ def evaluate(
   inputs: list[torch.Tensor],
   grad_inputs: tuple[int, ...],
   upstream: torch.Tensor,
-  fp16: bool,
+  dtype: torch.dtype | None,
 ) -> tuple[torch.Tensor, list[torch.Tensor]]:
   """Value of ``fn(*inputs)`` and the gradients of ``sum(value * upstream)`` with
-  respect to the inputs ``grad_inputs``."""
+  respect to the inputs ``grad_inputs``, under autocast to ``dtype`` if given."""
   leaves = [x.clone().requires_grad_(i in grad_inputs) for i, x in enumerate(inputs)]
-  with torch.autocast("cuda", dtype=torch.float16, enabled=fp16):
+  with torch.autocast("cuda", dtype=dtype or torch.float16, enabled=dtype is not None):
     value = fn(*leaves)
   grads = torch.autograd.grad(
     (value.float() * upstream).sum(),
@@ -89,6 +93,7 @@ def main() -> int:
     description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
   )
   parser.add_argument("--checkpoint", type=Path, default=CHECKPOINT)
+  parser.add_argument("--task", default=TASK, help="task of the checkpoint's layout")
   parser.add_argument(
     "--anchor-body",
     default="pelvis",
@@ -100,19 +105,20 @@ def main() -> int:
   parser.add_argument("--batch", type=int, default=32768, help="states per check")
   parser.add_argument("--tol", type=float, default=1e-5)
   parser.add_argument("--tol-fp16-head", type=float, default=1e-2)
+  parser.add_argument("--tol-bf16-head", type=float, default=1e-1)
   parser.add_argument("--out", type=Path, default=None, help="JSON of all rows")
   args = parser.parse_args()
   device = "cuda:0"
   started = time.time()
 
-  env_cfg = load_env_cfg(TASK)
+  env_cfg = load_env_cfg(args.task)
   motion_cfg = env_cfg.commands["motion"]
   assert isinstance(motion_cfg, MotionCommandCfg)
   motion_cfg.motion_file = tuple(str(p) for p in sorted(args.motions_dir.glob("*.npz")))
   motion_cfg.anchor_body_name = args.anchor_body
   env_cfg.scene.num_envs = args.num_envs
   env_cfg.seed = 0
-  agent_cfg = load_rl_cfg(TASK)
+  agent_cfg = load_rl_cfg(args.task)
   assert isinstance(agent_cfg, SuperMimicRunnerCfg)
   agent_cfg.precision.compile = False
   agent_cfg.precision.autocast = "none"
@@ -160,13 +166,14 @@ def main() -> int:
 
   def check(name, fn, inputs, grad_inputs, upstreams) -> None:
     compiled = torch.compile(fn)
-    for fp16 in (False, True):
+    head_tol = {"fp16": args.tol_fp16_head, "bf16": args.tol_bf16_head}
+    for precision, dtype in PRECISIONS.items():
       for label, upstream in upstreams.items():
-        value, grads = evaluate(fn, inputs, grad_inputs, upstream, fp16)
-        value_c, grads_c = evaluate(compiled, inputs, grad_inputs, upstream, fp16)
+        value, grads = evaluate(fn, inputs, grad_inputs, upstream, dtype)
+        value_c, grads_c = evaluate(compiled, inputs, grad_inputs, upstream, dtype)
         row = {
           "function": f"{name}{label}",
-          "precision": "fp16" if fp16 else "fp32",
+          "precision": precision,
           "value": relative_error(value_c, value),
         }
         for i, grad, grad_c in zip(grad_inputs, grads, grads_c, strict=True):
@@ -176,7 +183,7 @@ def main() -> int:
           row[f"grad_input{i}_norm"] = float(grad.double().norm())
         rows.append(row)
         log(json.dumps(row))
-        tol = args.tol_fp16_head if fp16 and "head" in name else args.tol
+        tol = head_tol.get(precision, args.tol) if "head" in name else args.tol
         if not worst <= tol:
           failures.append(
             f"{row['function']} {row['precision']}: {worst:.2e} > {tol:g}"

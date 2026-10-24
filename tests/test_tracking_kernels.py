@@ -43,6 +43,93 @@ def test_quat_error_magnitude_gradient_finite_at_zero_error() -> None:
   assert torch.isfinite(grad).all()
 
 
+def _uni_quat_to_mat(q: torch.Tensor) -> torch.Tensor:
+  """Uni-SuperMimic geometry.quat_to_mat (wxyz)."""
+  q = torch.nn.functional.normalize(q, dim=-1)
+  w, x, y, z = q.unbind(-1)
+  rows = (
+    1 - 2 * (y * y + z * z),
+    2 * (x * y - w * z),
+    2 * (x * z + w * y),
+    2 * (x * y + w * z),
+    1 - 2 * (x * x + z * z),
+    2 * (y * z - w * x),
+    2 * (x * z - w * y),
+    2 * (y * z + w * x),
+    1 - 2 * (x * x + y * y),
+  )
+  return torch.stack(rows, dim=-1).reshape(q.shape[:-1] + (3, 3))
+
+
+def _uni_yaw_mat(rotation: torch.Tensor) -> torch.Tensor:
+  """Uni-SuperMimic geometry.yaw_mat: heading from the body x axis."""
+  forward_x, forward_y = rotation[..., 0, 0], rotation[..., 1, 0]
+  norm = torch.sqrt(forward_x * forward_x + forward_y * forward_y + 1e-9)
+  cos, sin = forward_x / norm, forward_y / norm
+  zero, one = torch.zeros_like(cos), torch.ones_like(cos)
+  return torch.stack((cos, -sin, zero, sin, cos, zero, zero, zero, one), -1).reshape(
+    rotation.shape[:-2] + (3, 3)
+  )
+
+
+def test_reference_goal_and_orientation_error_match_uni_formulas() -> None:
+  """``reference_heading_goal`` and ``relative_rotation_6d`` against a float64 port of
+  Uni-SuperMimic's MotionLib.goal (motion.py:156-175) and SuperMimicMdp.obs
+  (mdp.py:122) on random states and frames, in rotation-matrix form."""
+  generator = torch.Generator().manual_seed(0)
+  batch, num_frames, num_joints = 1000, 10, 29
+  ref_quat = _random_quat(batch, generator)
+  ref_pos = 3 * torch.randn(batch, 3, generator=generator)
+  future_quat = _random_quat(batch * num_frames, generator).view(batch, num_frames, 4)
+  future_pos = ref_pos.unsqueeze(1) + torch.randn(
+    batch, num_frames, 3, generator=generator
+  )
+  lin_vel = torch.randn(batch, num_frames, 3, generator=generator)
+  ang_vel = torch.randn(batch, num_frames, 3, generator=generator)
+  joint_pos = torch.randn(batch, num_frames, num_joints, generator=generator)
+  joint_vel = 5 * torch.randn(batch, num_frames, num_joints, generator=generator)
+  robot_quat = _random_quat(batch, generator)
+
+  goal = kernels.reference_heading_goal(
+    ref_pos, ref_quat, future_pos, future_quat, lin_vel, ang_vel, joint_pos, joint_vel
+  )
+  error = kernels.relative_rotation_6d(robot_quat, ref_quat)
+
+  # Uni, float64: heading of the current frame, future frames relative to it.
+  d = lambda t: t.double()  # noqa: E731
+  heading_t = _uni_yaw_mat(_uni_quat_to_mat(d(ref_quat))).transpose(-1, -2)
+  future_mat = _uni_quat_to_mat(d(future_quat))
+  delta = (d(future_pos) - d(ref_pos).unsqueeze(1)).unsqueeze(-1)
+  position_delta = (heading_t.unsqueeze(1) @ delta).squeeze(-1)
+  rotation = (heading_t.unsqueeze(1) @ future_mat)[..., :, :2].reshape(
+    batch, num_frames, 6
+  )
+  future_t = future_mat.transpose(-1, -2)
+  expected_goal = torch.cat(
+    (
+      position_delta,
+      rotation,
+      (future_t @ d(lin_vel).unsqueeze(-1)).squeeze(-1),
+      (future_t @ d(ang_vel).unsqueeze(-1)).squeeze(-1),
+      d(joint_pos),
+      0.1 * d(joint_vel),
+    ),
+    -1,
+  ).reshape(batch, -1)
+  robot_t = _uni_quat_to_mat(d(robot_quat)).transpose(-1, -2)
+  expected_error = (robot_t @ _uni_quat_to_mat(d(ref_quat)))[..., :, :2].reshape(
+    batch, 6
+  )
+
+  assert goal.shape == (batch, num_frames * (15 + 2 * num_joints))
+  goal_err = float((goal.double() - expected_goal).abs().max())
+  error_err = float((error.double() - expected_error).abs().max())
+  print(
+    f"\ngoal max abs err {goal_err:.2e}, orientation error max abs err {error_err:.2e}"
+  )
+  assert goal_err <= 1e-5 and error_err <= 1e-5
+
+
 def test_tracking_rewards_have_finite_gradients_at_zero_error() -> None:
   """Rewards of an FK state against itself (perfect tracking) backpropagate."""
   model = Entity(get_g1_robot_cfg()).compile()

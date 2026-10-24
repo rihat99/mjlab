@@ -1,5 +1,7 @@
 """Unitree G1 flat tracking environment configurations."""
 
+from typing import Literal
+
 from mjlab.asset_zoo.robots import (
   G1_ACTION_SCALE,
   get_g1_robot_cfg,
@@ -116,15 +118,23 @@ def unitree_g1_flat_tracking_supermimic_env_cfg(
   play: bool = False,
   self_collision: bool = False,
   friction_all_geoms: bool = True,
+  goal: Literal["reference", "anchor"] = "reference",
 ) -> ManagerBasedRlEnvCfg:
   """Baseline tracking cfg changed to the SuperMimic paper's env (Tables A.1-A.3).
 
   No pushes, no self-collision penalty, joint-limit weight -2, no end-effector
   termination, and the clip end is a time-out (``motion_end``). Observation groups:
   ``actor`` = 10-frame history of [joint_pos, joint_vel, base_ang_vel,
-  projected_gravity, actions] (930, flattened term-major, each term's frames oldest
-  first) and ``goal`` = reference frames k_t .. k_t + 9 (670), k_t being the frame
-  the next reward is scored against. There is no critic group.
+  projected_gravity, actions] (flattened term-major, each term's frames oldest
+  first) and ``goal`` = reference frames k_t .. k_t + 9, k_t being the frame the
+  next reward is scored against. There is no critic group. ``goal="reference"``
+  (Uni-SuperMimic's layout, deployable without a position estimate): the goal holds
+  the reference only, in the heading frame of the current frame k_t - 1
+  (``motion_future_frames_reference``, 730), and the actor gains the orientation
+  error to that frame (``motion_current_anchor_ori_b``, 99 per frame, 990).
+  ``goal="anchor"`` (the layout of the checkpoints before 2026-10-24): the frames
+  seen from the robot anchor (``motion_future_frames_b``, 670), actor 93 per frame
+  (930).
   ``commands.motion.motion_file`` takes a tuple of npz paths (the clip library) or a
   ``.txt`` file listing them.
   The ``terminal_state`` recorder keeps the pre-reset state of auto-reset envs.
@@ -167,17 +177,29 @@ def unitree_g1_flat_tracking_supermimic_env_cfg(
   )
 
   actor_terms = cfg.observations["actor"].terms
+  new_actor_terms = {
+    "joint_pos": actor_terms["joint_pos"],
+    "joint_vel": actor_terms["joint_vel"],
+    "base_ang_vel": actor_terms["base_ang_vel"],
+    "projected_gravity": ObservationTermCfg(
+      func=mdp.projected_gravity, noise=Unoise(n_min=-0.05, n_max=0.05)
+    ),
+    "actions": actor_terms["actions"],
+  }
+  if goal == "reference":
+    # Uni-SuperMimic's noise scale for the 6D orientation error (mdp.py:30-39).
+    new_actor_terms["motion_anchor_ori"] = ObservationTermCfg(
+      func=mdp.motion_current_anchor_ori_b,
+      params={"command_name": "motion"},
+      noise=Unoise(n_min=-0.05, n_max=0.05),
+    )
+  goal_func = {
+    "reference": mdp.motion_future_frames_reference,
+    "anchor": mdp.motion_future_frames_b,
+  }[goal]
   cfg.observations = {
     "actor": ObservationGroupCfg(
-      terms={
-        "joint_pos": actor_terms["joint_pos"],
-        "joint_vel": actor_terms["joint_vel"],
-        "base_ang_vel": actor_terms["base_ang_vel"],
-        "projected_gravity": ObservationTermCfg(
-          func=mdp.projected_gravity, noise=Unoise(n_min=-0.05, n_max=0.05)
-        ),
-        "actions": actor_terms["actions"],
-      },
+      terms=new_actor_terms,
       enable_corruption=not play,
       history_length=10,
       flatten_history_dim=True,
@@ -185,7 +207,7 @@ def unitree_g1_flat_tracking_supermimic_env_cfg(
     "goal": ObservationGroupCfg(
       terms={
         "motion_future_frames": ObservationTermCfg(
-          func=mdp.motion_future_frames_b,
+          func=goal_func,
           params={"command_name": "motion", "future_frames": 10},
         ),
       },

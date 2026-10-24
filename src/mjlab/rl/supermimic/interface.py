@@ -84,7 +84,11 @@ class ModelInterface(Protocol):
     ...
 
   def observation(
-    self, s: torch.Tensor, a_prev: torch.Tensor, env_idx: torch.Tensor
+    self,
+    s: torch.Tensor,
+    a_prev: torch.Tensor,
+    env_idx: torch.Tensor,
+    frame: torch.Tensor,
   ) -> torch.Tensor:
     """(grad) Noise-free observation frame.
 
@@ -94,6 +98,8 @@ class ModelInterface(Protocol):
         start).
       env_idx: (B,) int64 env of each row (selects per-env constants such as encoder
         bias).
+      frame: (B,) int64 frame k_t the observation targets (terms that compare ``s``
+        with the reference use it; the state is aligned with k_t - 1).
 
     Returns:
       (B, obs_dim) observation, terms in ``obs_term_dims`` order.

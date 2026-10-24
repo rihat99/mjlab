@@ -64,9 +64,18 @@ def _maybe_compile(fn: Callable, enabled: bool, mode: str | None = None) -> Call
   return torch.compile(fn, mode=mode) if enabled else fn
 
 
-def _maybe_fp16(fn: Callable, enabled: bool, device: torch.device) -> Callable:
-  """``fn`` under fp16 autocast when enabled, else ``fn`` itself."""
-  return torch.autocast(device.type, dtype=torch.float16)(fn) if enabled else fn
+def _maybe_autocast(
+  fn: Callable, dtype: torch.dtype | None, device: torch.device
+) -> Callable:
+  """``fn`` under autocast to ``dtype`` when given, else ``fn`` itself."""
+  return torch.autocast(device.type, dtype=dtype)(fn) if dtype is not None else fn
+
+
+_AUTOCAST_DTYPES: dict[str, torch.dtype | None] = {
+  "none": None,
+  "fp16": torch.float16,
+  "bf16": torch.bfloat16,
+}
 
 
 def _step_unless(optimizer: torch.optim.Optimizer, skip: torch.Tensor) -> None:
@@ -120,16 +129,17 @@ class SuperMimic:
     device: str | torch.device,
     compile: bool = False,
     action_noise_std: float = 0.0,
-    autocast: Literal["none", "fp16"] = "none",
+    autocast: Literal["none", "fp16", "bf16"] = "none",
   ) -> None:
     """``action_noise_std`` is the simulator's action noise (the runner passes
     ``CollectionCfg.action_noise_std``); imagination adds it to the policy action when
-    ``policy_cfg.imagine_action_noise``. ``autocast="fp16"`` runs the world-model
-    loss, the imagined steps and the policy objective under fp16 autocast, each
-    backward pass on a loss scaled by its gradient scaler (``world_model_scaler``,
-    ``policy_scaler``; see ``PrecisionCfg.autocast``)."""
-    if autocast not in ("none", "fp16"):
-      raise ValueError(f"autocast must be 'none' or 'fp16', got {autocast!r}.")
+    ``policy_cfg.imagine_action_noise``. ``autocast="bf16"`` / ``"fp16"`` runs the
+    world-model loss, the imagined steps and the policy objective under autocast to
+    that dtype; with fp16 each backward pass runs on a loss scaled by its gradient
+    scaler (``world_model_scaler``, ``policy_scaler``), with bf16 (fp32's exponent
+    range) the scalers stay disabled (see ``PrecisionCfg.autocast``)."""
+    if autocast not in _AUTOCAST_DTYPES:
+      raise ValueError(f"autocast must be 'none', 'fp16' or 'bf16', got {autocast!r}.")
     self.iface = iface
     self.world_model_cfg = world_model_cfg
     self.policy_cfg = policy_cfg
@@ -166,6 +176,7 @@ class SuperMimic:
     )
     # Dynamic loss scales of the fp16 backward passes; disabled they do nothing.
     fp16 = autocast == "fp16"
+    dtype = _AUTOCAST_DTYPES[autocast]
     self.world_model_scaler = torch.amp.GradScaler(self.device.type, enabled=fp16)
     self.policy_scaler = torch.amp.GradScaler(self.device.type, enabled=fp16)
     self.skipped_policy_steps = 0
@@ -182,18 +193,18 @@ class SuperMimic:
     # update in place); the objective reads the critic normaliser, which rsl_rl
     # replaces each iteration, and the state heads also serve variable-size batches.
     graphs = "reduce-overhead"
-    self._world_model_loss = _maybe_fp16(
-      _maybe_compile(world_model_loss, compile, graphs), fp16, self.device
+    self._world_model_loss = _maybe_autocast(
+      _maybe_compile(world_model_loss, compile, graphs), dtype, self.device
     )
     self._state_heads = _maybe_compile(self.state_heads, compile)
-    self._imagine_step = _maybe_fp16(
-      _maybe_compile(self.imagine_step, compile, graphs), fp16, self.device
+    self._imagine_step = _maybe_autocast(
+      _maybe_compile(self.imagine_step, compile, graphs), dtype, self.device
     )
     # Eager: compiled as a whole, its forward matched but its policy gradient did not
     # (cosine ~0.54 to the eager gradient on identical rollouts, D2 stage H). Its
     # reward and termination, compiled each on its own, keep the eager gradient
     # (tools/check_policy_grad.py checks both).
-    self._policy_objective = _maybe_fp16(self.policy_objective, fp16, self.device)
+    self._policy_objective = _maybe_autocast(self.policy_objective, dtype, self.device)
     self._reward = _maybe_compile(iface.reward, compile)
     self._termination = _maybe_compile(self.termination, compile)
     self._critic_loss = _maybe_compile(self.critic_loss, compile, graphs)
@@ -386,7 +397,7 @@ class SuperMimic:
     """
     action = self.policy.forward_frames(frames, goal) + action_noise
     s_next = self.world_model.step(s, features, action, context)
-    obs = self.iface.observation(s_next, action, env_idx)
+    obs = self.iface.observation(s_next, action, env_idx, next_frame)
     next_features, next_goal = self.state_heads(s_next, next_frame)
     return action, s_next, obs, next_features, next_goal
 
@@ -401,7 +412,7 @@ class SuperMimic:
       return self.iface.termination_soft(next_states, frames).view(horizon, num)
     head_goals = self.iface.goal(next_states, frames).view(horizon, num, -1)
     logit = self.world_model.termination_head(next_features, head_goals)
-    # fp32 under autocast: in fp16, d < 2.4e-4 would round 1 - d to 1.
+    # fp32 under autocast: in fp16 (bf16), d < 2.4e-4 (3.9e-3) would round 1 - d to 1.
     return torch.sigmoid(logit.float())
 
   def policy_objective(
@@ -485,8 +496,9 @@ class SuperMimic:
       hist_states = seeds["state_hist"].flatten(0, 1)
       hist_actions = seeds["prev_action_hist"].flatten(0, 1)
       hist_env = env_idx.repeat_interleave(cfg.history_length)
+      hist_frames = seeds["frame_hist"].flatten()
       frames = iface.add_observation_noise(
-        iface.observation(hist_states, hist_actions, hist_env)
+        iface.observation(hist_states, hist_actions, hist_env, hist_frames)
       ).view(num, cfg.history_length, iface.obs_dim)
 
     frozen = (self.world_model, self.critic)

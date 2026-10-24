@@ -130,15 +130,17 @@ class PrecisionCfg:
   with far fewer kernel launches. The policy objective stays eager (compiled as a
   whole, its backward was wrong); its reward and termination are compiled each on
   its own. False runs everything eagerly."""
-  autocast: Literal["fp16", "none"] = "fp16"
-  """(choice) "fp16": the world-model loss, the imagined steps and the policy
-  objective run under fp16 autocast (matmuls in fp16 with fp32 accumulation, about
-  twice the TF32 rate; TF32's 10-bit mantissa, but every Linear output and
-  activation is rounded to fp16 too), and each of the two
-  backward passes runs on a loss scaled by its own dynamic ``torch.amp.GradScaler``;
-  the gradients are unscaled before the clips, a step whose scaled gradients
-  overflow is skipped and counted. Collection and the critic fit stay fp32. "none":
-  fp32 throughout (TF32 matmuls with ``tf32``)."""
+  autocast: Literal["bf16", "fp16", "none"] = "bf16"
+  """(choice) "bf16": the world-model loss, the imagined steps and the policy
+  objective run under bfloat16 autocast (matmuls in bf16 with fp32 accumulation,
+  about twice the TF32 rate; every Linear output and activation is rounded to bf16's
+  8-bit mantissa). bf16 has fp32's exponent range, so no loss scaling: the gradient
+  scalers are disabled, as with "none". "fp16": the same under float16 autocast
+  (11-bit mantissa, narrow range), and each of the two backward passes runs on a
+  loss scaled by its own dynamic ``torch.amp.GradScaler``; the gradients are unscaled
+  before the clips, a step whose scaled gradients overflow is skipped and counted.
+  Collection and the critic fit stay fp32. "none": fp32 throughout (TF32 matmuls
+  with ``tf32``)."""
 
 
 @dataclass

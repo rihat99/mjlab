@@ -12,6 +12,7 @@ import torch
 from mjlab.managers import CommandTerm, CommandTermCfg
 from mjlab.utils.lab_api.math import (
   matrix_from_quat,
+  normalize,
   quat_error_magnitude,
   quat_from_euler_xyz,
   quat_mul,
@@ -350,6 +351,34 @@ class MotionCommand(CommandTerm):
     offsets = torch.arange(num_frames, device=frames.device)
     last = self.clip_end_of(frames) - 1
     return torch.minimum(frames.unsqueeze(-1) + offsets, last.unsqueeze(-1))
+
+  def current_frames(self, frames: torch.Tensor) -> torch.Tensor:
+    """Frame the state shown with ``frames`` is aligned with: ``frames - 1``, not
+    before the clip start (a reset writes the state of frame k and shows k + 1; the
+    next reward is scored against k + 1). (B,) -> (B,)."""
+    start = self.motion.clip_start[self.motion.clip_id_of_frame[frames]]
+    return torch.maximum(frames - 1, start)
+
+  def reference_goal(self, frames: torch.Tensor, num_frames: int) -> torch.Tensor:
+    """Goal of ``kernels.reference_heading_goal`` at ``frames`` (B,): the anchor of
+    frames ``frames .. frames + num_frames - 1`` (``future_frames``) in the heading
+    frame of ``current_frames(frames)``. (B, num_frames * (15 + 2 J))."""
+    current = self.current_frames(frames)
+    future = self.future_frames(frames, num_frames)
+    anchor = self.motion_anchor_body_index
+    motion = self.motion
+    # The library's float16 quaternions are unit only to ~1e-3; the heading (yaw_quat)
+    # and the body-frame velocities (quat_apply_inverse) need unit quaternions.
+    return kernels.reference_heading_goal(
+      motion.body_pos_w[current, anchor],
+      normalize(motion.body_quat_w[current, anchor].float()),
+      motion.body_pos_w[future, anchor],
+      normalize(motion.body_quat_w[future, anchor].float()),
+      motion.body_lin_vel_w[future, anchor].float(),
+      motion.body_ang_vel_w[future, anchor].float(),
+      motion.joint_pos[future].float(),
+      motion.joint_vel[future].float(),
+    )
 
   def assign_clips_from_start(self, env_ids: torch.Tensor) -> None:
     """Point env ``i`` at the first frame of clip ``start_clip[i]`` (default ``i mod

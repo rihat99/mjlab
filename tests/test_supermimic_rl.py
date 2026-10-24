@@ -100,7 +100,8 @@ class _SyntheticInterface:
   def invariant_features(self, s):
     return self.layout.invariant_features(s)
 
-  def observation(self, s, a_prev, env_idx):
+  def observation(self, s, a_prev, env_idx, frame):
+    del frame  # No term compares the state with the reference.
     _, quat, _, ang_vel, q, qd = self.layout.split(s)
     gravity = torch.zeros_like(ang_vel)
     gravity[:, 2] = -1.0
@@ -276,7 +277,9 @@ class _SyntheticEnv:
     self.history[env_ids] = obs.unsqueeze(1).expand(-1, HISTORY, -1)
 
   def _noisy_obs(self, env_ids: torch.Tensor) -> torch.Tensor:
-    obs = self.iface.observation(self.state[env_ids], self.a_prev[env_ids], env_ids)
+    obs = self.iface.observation(
+      self.state[env_ids], self.a_prev[env_ids], env_ids, self.frame[env_ids]
+    )
     return self.iface.add_observation_noise(obs)
 
   def _dynamics(self, s: torch.Tensor, action: torch.Tensor) -> torch.Tensor:

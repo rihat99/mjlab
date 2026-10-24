@@ -11,16 +11,19 @@ policy gradient is compared as stored in ``.grad`` (after both clips), and likew
 world-model gradient after ``fit_world_model`` (its last batch). Candidates:
 
   compiled         the compiled build (``precision.compile``) without autocast
-  compiled_fp16    the default build: compiled, fp16 autocast, gradient scalers
+  compiled_bf16    the default build: compiled, bf16 autocast (no gradient scalers)
+  compiled_fp16    compiled, fp16 autocast, gradient scalers
   whole_objective  the policy objective compiled as one function: the known-bad build,
                    which the check must catch
 
 Exit status 1 when ``compiled`` has a mean policy-gradient cosine below
-``--min-cosine``, ``compiled_fp16`` below ``--min-cosine-fp16``, or
-``whole_objective`` reaches ``--min-cosine`` (the check would not catch the bug).
-Single trials vary: 32-step rollouts are chaotic, single trials of the TF32 build dip
-to cosine ~0.992 and of the fp16 build to ~0.983, hence the mean over 6 trials. 4-6
-minutes on one GPU:
+``--min-cosine``, ``compiled_bf16`` below ``--min-cosine-bf16``, ``compiled_fp16``
+below ``--min-cosine-fp16``, or ``whole_objective`` reaches ``--min-cosine`` (the
+check would not catch the bug). Single trials vary: 32-step rollouts are chaotic,
+single trials of the TF32 build dip to cosine ~0.992 and of the fp16 build to ~0.983,
+hence the mean over 6 trials. ``--task`` must be the checkpoint's goal layout
+(``-AnchorGoal`` for checkpoints before 2026-10-24, the default checkpoint among
+them). 4-6 minutes on one GPU:
 
     CUDA_VISIBLE_DEVICES=0 MUJOCO_GL=egl .venv/bin/python tools/check_policy_grad.py
 """
@@ -34,6 +37,7 @@ import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
+from typing import Literal
 
 import torch
 from paths import LOG_ROOT, MOTIONS_DIR
@@ -47,10 +51,14 @@ from mjlab.rl.supermimic.runner import SuperMimicRunner
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg
 from mjlab.tasks.tracking.mdp.commands import MotionCommandCfg
 
-TASK = "Mjlab-Tracking-Flat-Unitree-G1-SuperMimic"
+TASK = "Mjlab-Tracking-Flat-Unitree-G1-SuperMimic-AnchorGoal"
 CHECKPOINT = LOG_ROOT / "2026-10-23_00-33-44_final_learnedhead" / "model_14000.pt"
 PARTS = {"actor": True, "critic": True, "world_model": True, "optimizer": True}
-CANDIDATES = ("compiled", "compiled_fp16", "whole_objective")
+CANDIDATES = ("compiled", "compiled_bf16", "compiled_fp16", "whole_objective")
+AUTOCAST: dict[str, Literal["none", "fp16", "bf16"]] = {
+  "compiled_bf16": "bf16",
+  "compiled_fp16": "fp16",
+}
 
 
 def log(message: str) -> None:
@@ -80,6 +88,7 @@ def main() -> int:
     description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
   )
   parser.add_argument("--checkpoint", type=Path, default=CHECKPOINT)
+  parser.add_argument("--task", default=TASK, help="task of the checkpoint's layout")
   parser.add_argument(
     "--anchor-body",
     default="torso_link",
@@ -105,13 +114,14 @@ def main() -> int:
     "summation order, far less than TF32 rounding, which the rollouts amplify",
   )
   parser.add_argument("--min-cosine", type=float, default=0.995)
+  parser.add_argument("--min-cosine-bf16", type=float, default=0.99)
   parser.add_argument("--min-cosine-fp16", type=float, default=0.99)
   parser.add_argument("--out", type=Path, default=None, help="JSON of all trials")
   args = parser.parse_args()
   device = "cuda:0"
   started = time.time()
 
-  env_cfg = load_env_cfg(TASK)
+  env_cfg = load_env_cfg(args.task)
   motions = sorted(args.motions_dir.glob("*.npz"))
   motion_cfg = env_cfg.commands["motion"]
   assert isinstance(motion_cfg, MotionCommandCfg)
@@ -119,7 +129,7 @@ def main() -> int:
   motion_cfg.anchor_body_name = args.anchor_body
   env_cfg.scene.num_envs = args.num_envs
   env_cfg.seed = 0
-  agent_cfg = load_rl_cfg(TASK)
+  agent_cfg = load_rl_cfg(args.task)
   assert isinstance(agent_cfg, SuperMimicRunnerCfg)
   if args.analytic_termination != "cfg":
     agent_cfg.policy.analytic_termination = args.analytic_termination == "true"
@@ -160,7 +170,7 @@ def main() -> int:
       device,
       compile=True,
       action_noise_std=runner.collection_cfg.action_noise_std,
-      autocast="fp16" if candidate == "compiled_fp16" else "none",
+      autocast=AUTOCAST.get(candidate, "none"),
     )
     alg.load_state_dict(checkpoint, PARTS, strict=True)
     disable_steps(alg)
@@ -230,6 +240,8 @@ def main() -> int:
     log(json.dumps(summary))
     if candidate == "compiled" and not mean_policy >= args.min_cosine:
       failures.append(f"compiled: mean policy cosine {mean_policy:.5f}")
+    if candidate == "compiled_bf16" and not mean_policy >= args.min_cosine_bf16:
+      failures.append(f"compiled_bf16: mean policy cosine {mean_policy:.5f}")
     if candidate == "compiled_fp16" and not mean_policy >= args.min_cosine_fp16:
       failures.append(f"compiled_fp16: mean policy cosine {mean_policy:.5f}")
     if candidate == "whole_objective" and mean_policy >= args.min_cosine:

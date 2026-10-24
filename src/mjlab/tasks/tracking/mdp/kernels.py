@@ -333,3 +333,57 @@ def future_frames_goal(
     anchor_quat_w.unsqueeze(-2).expand_as(ref_anchor_quat_w),
   )
   return torch.cat([pos_b, ori_b, ref_joint_pos, ref_joint_vel], dim=-1).flatten(-2)
+
+
+def relative_rotation_6d(
+  quat_w: torch.Tensor, ref_quat_w: torch.Tensor
+) -> torch.Tensor:
+  """Orientation error R^T R_ref as 6D, Uni-SuperMimic's ``relative_rotation``
+  (mdp.py:122): (..., 4), (..., 4) -> (..., 6), the first two columns of the matrix
+  flattened row by row, as ``pose_in_frame``."""
+  mat = matrix_from_quat(quat_mul(quat_conjugate(quat_w), ref_quat_w))
+  return mat[..., :2].reshape(*mat.shape[:-2], 6)
+
+
+def reference_heading_goal(
+  ref_pos_w: torch.Tensor,
+  ref_quat_w: torch.Tensor,
+  future_pos_w: torch.Tensor,
+  future_quat_w: torch.Tensor,
+  future_lin_vel_w: torch.Tensor,
+  future_ang_vel_w: torch.Tensor,
+  future_joint_pos: torch.Tensor,
+  future_joint_vel: torch.Tensor,
+) -> torch.Tensor:
+  """Goal from K reference frames in the heading frame of the current reference
+  frame; the robot state does not enter (Uni-SuperMimic ``MotionLib.goal``,
+  motion.py:156-175).
+
+  Per frame: root position minus the current reference root position, rotated into
+  the current reference heading frame (yaw of ``ref_quat_w``) (3); the root rotation
+  in that heading frame as 6D (6); root linear and angular velocity in the frame's
+  own root frame (3 + 3); joint positions (J); 0.1 x joint velocities (J). Frames
+  are concatenated in order (k-major).
+
+  Args:
+    ref_pos_w: (B, 3) root position of the current reference frame.
+    ref_quat_w: (B, 4) root orientation of the current reference frame.
+    future_pos_w: (B, K, 3) root positions of the K frames.
+    future_quat_w: (B, K, 4) root orientations of the K frames.
+    future_lin_vel_w: (B, K, 3) root linear velocities (world).
+    future_ang_vel_w: (B, K, 3) root angular velocities (world).
+    future_joint_pos: (B, K, J) joint positions.
+    future_joint_vel: (B, K, J) joint velocities.
+
+  Returns:
+    (B, K * (15 + 2 J)); 730 on the G1 with K = 10.
+  """
+  heading = yaw_quat(ref_quat_w).unsqueeze(-2).expand_as(future_quat_w)
+  pos_h = quat_apply_inverse(heading, future_pos_w - ref_pos_w.unsqueeze(-2))
+  ori_h = relative_rotation_6d(heading, future_quat_w)
+  lin_vel_b = quat_apply_inverse(future_quat_w, future_lin_vel_w)
+  ang_vel_b = quat_apply_inverse(future_quat_w, future_ang_vel_w)
+  return torch.cat(
+    [pos_h, ori_h, lin_vel_b, ang_vel_b, future_joint_pos, 0.1 * future_joint_vel],
+    dim=-1,
+  ).flatten(-2)
