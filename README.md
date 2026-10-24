@@ -31,12 +31,14 @@ so data collection concentrates on what it cannot track yet.
 - `src/mjlab/tasks/tracking/mdp/commands.py`: multi-clip motion library
   (`motion_file` takes a tuple of npz or a `.txt` file listing them; only the tracked
   bodies are kept, in float16 except the body positions), return-based reset sampling
-  per clip bin, `motion_end` time-out; `observations.py`: 10-frame future-reference
-  goal.
+  per clip bin, `motion_end` time-out; `observations.py`: the 10-frame
+  future-reference goal in its two layouts (see Configuration pointers) and the
+  orientation-error term.
 - `src/mjlab/tasks/tracking/supermimic/`: `TrackingModelInterface` (observation,
   goal, reward and termination on imagined states) and the terminal-state recorder.
 - Task `Mjlab-Tracking-Flat-Unitree-G1-SuperMimic`
-  (`src/mjlab/tasks/tracking/config/g1/`).
+  (`src/mjlab/tasks/tracking/config/g1/`); the `-AnchorGoal` variants keep the
+  observation layout of the checkpoints before 2026-10-24.
 - `src/mjlab/tasks/tracking/scripts/evaluate_library.py`: library evaluation (paper
   App. F.1: each clip once from frame 0, play config, deterministic policy), in waves
   of at most `--num-envs` clips (default 4096), longest clips first.
@@ -347,6 +349,23 @@ fails 0.1 / 0.8 / 2.5 per pass. Both runs take 0.40 s per iteration (median over
   robot geom and the ground to 1.0. The task
   `Mjlab-Tracking-Flat-Unitree-G1-SuperMimic-SelfCollision` keeps the previous
   physics (`self_collision=True, friction_all_geoms=False`).
+- Goal layout (`goal` of `unitree_g1_flat_tracking_supermimic_env_cfg`). The default
+  `"reference"` is Uni-SuperMimic's deployable layout: the goal holds the 10 reference
+  frames k_t .. k_t + 9 only, each as root position delta (3), root rotation (6D),
+  root linear and angular velocity in the frame's own root frame (3 + 3), joint
+  positions (29) and 0.1 x joint velocities (29), position and rotation expressed in
+  the heading (yaw) frame of the current reference frame k_t - 1 (730 in all); the
+  actor frame gains the 6D orientation error of the robot root to that current
+  reference frame (noise U(-0.05, 0.05); 99 per frame, 990 with the history). No
+  robot position enters the policy input, so deployment needs no global position
+  estimate; per-step returns are expected a few hundredths below the previous layout,
+  which showed the policy its full anchor position error. k_t - 1 is Uni's frame
+  `f` (its reward scores `f + 1`); the goal frames are Uni's `f + 1 .. f + 10`.
+  `"anchor"` is the previous layout (the reference anchor poses seen from the robot
+  anchor, 670; actor 930): tasks `Mjlab-Tracking-Flat-Unitree-G1-SuperMimic-AnchorGoal`
+  and `...-SelfCollision-AnchorGoal`, which every checkpoint from before 2026-10-24
+  needs (`evaluate_library`, `tools/check_policy_grad.py --task`,
+  `tools/check_reward_grad.py --task`).
 - `PolicyCfg.analytic_termination` (default on): imagination uses the task's analytic
   soft termination instead of the learned head (the head keeps training, for
   logging). The learned head is kept for comparison only.
@@ -369,13 +388,17 @@ fails 0.1 / 0.8 / 2.5 per pass. Both runs take 0.40 s per iteration (median over
   more). `tools/check_reward_grad.py` (about 5 minutes) is the tight check: compiled
   vs eager reward, reward terms and termination on identical inputs, values and input
   gradients within 2e-6 relative (the learned head under fp16: 2e-3).
-- `PrecisionCfg.autocast` (default `"fp16"`): the world-model loss, the imagined steps
-  and the policy objective run under fp16 autocast, each backward pass with its own
+- `PrecisionCfg.autocast` (default `"bf16"`): the world-model loss, the imagined steps
+  and the policy objective run under bfloat16 autocast. bf16 has fp32's exponent
+  range, so there is no loss scaling: the gradient scalers are disabled and the
+  `Metrics/*_grad_scale` columns are absent, as with `"none"`; its 8-bit mantissa
+  rounds every Linear output and activation more coarsely than fp16 (11 bits).
+  `"fp16"` runs the same under float16 autocast, each backward pass with its own
   dynamic gradient scaler (scales logged as `Metrics/*_grad_scale`, kept at 2^10 or
   more; an overflow skips the step and counts it in `Metrics/*_skipped_steps`; a log
   row with a scale below 2^12 or more than 0.5 % skipped steps prints a warning).
   Collection and the critic stay fp32. Unlike TF32, which rounds only the matmul
-  inputs, fp16 rounds every Linear output and activation to fp16. Policy-gradient
+  inputs, fp16 rounds every Linear output and activation to fp16. fp16 policy-gradient
   cosine to the eager gradient (see `tools/check_policy_grad.py` above for the noise):
   6-trial means 0.9937–0.9996 on the 14k learned-head checkpoint (TF32 compiled
   0.99736–0.9999), 0.914–0.9993 on the uni_env checkpoint, 0.980 against an fp32

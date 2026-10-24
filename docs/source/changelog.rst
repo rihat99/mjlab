@@ -54,6 +54,17 @@ Changed
   gradients with the eager learner's on a checkpoint (noisy under TF32, policy cosine
   means 0.98–0.9999; ``--no-tf32``: 0.999999), ``tools/check_reward_grad.py`` the
   compiled reward and termination with the eager ones (within 2e-6).
+- The SuperMimic policy input follows Uni-SuperMimic's deployable layout: the goal
+  holds the 10 reference frames only (root position delta, 6D rotation, local root
+  velocities, joint positions, 0.1 x joint velocities, in the heading frame of the
+  current reference frame; 730), no robot position enters it, and the actor frame
+  gains the 6D orientation error of the robot root to the current reference frame
+  (99 per frame). The previous layout (reference anchor poses seen from the robot
+  anchor, 670; actor 93 per frame) stays available for the existing checkpoints as
+  ``Mjlab-Tracking-Flat-Unitree-G1-SuperMimic-AnchorGoal`` and
+  ``...-SelfCollision-AnchorGoal`` (``goal="anchor"`` of the env cfg).
+  ``precision.autocast`` defaults to ``"bf16"``: no gradient scalers and no scale
+  metrics, as with ``"none"``; ``"fp16"`` keeps the scalers.
 - The tracking ``MotionLoader`` keeps only the tracked bodies and stores joints,
   body quaternions and body velocities in float16 (body positions in float32), so
   that a 47 M-frame library fits on one GPU (25 GiB); ``motion_file`` also takes a
