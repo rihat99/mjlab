@@ -65,6 +65,9 @@ Changed
   ``...-SelfCollision-AnchorGoal`` (``goal="anchor"`` of the env cfg).
   ``precision.autocast`` defaults to ``"bf16"``: no gradient scalers and no scale
   metrics, as with ``"none"``; ``"fp16"`` keeps the scalers.
+- ``PolicyCfg.seed_end_margin`` (default 0) keeps the last state of every imagined
+  rollout that many frames away from the clip end; ``MotionCommandCfg.float32_library``
+  (default False) stores the whole library in float32 for A/B tests.
 - The tracking ``MotionLoader`` keeps only the tracked bodies and stores joints,
   body quaternions and body velocities in float16 (body positions in float32), so
   that a 47 M-frame library fits on one GPU (25 GiB); ``motion_file`` also takes a

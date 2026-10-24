@@ -214,7 +214,7 @@ fail 4 or 7 clips; count failures over several rollouts per clip.
 
 BONES-SEED: train on the 129,043 kept clips (`--clips a,b` for a subset) and evaluate
 on all of them. The library goes to mjlab as `<log-root>/library_<hash>_files.txt`;
-each launch hashes the 85 GB of clips (~1 min) and loads the library (~6.6–10 min); training takes 0.38 s per iteration at 4096 envs (as on LAFAN) and 49 GB of GPU memory. A
+each launch hashes the 85 GB of clips (~1 min) and loads the library (~6.6–10 min); training takes 0.26 s per iteration at 4096 envs and 42 GB of GPU memory, with `--agent.policy.seed-end-margin 10` (see `seed_end_margin` below; without it every SEED run collapsed). A
 full evaluation pass at 4096 envs is 32 waves, 19,256 steps (~6 min of simulation at
 17.6 ms per step, plus the load):
 
@@ -406,6 +406,15 @@ fails 0.1 / 0.8 / 2.5 per pass. Both runs take 0.40 s per iteration (median over
   return 0.511 vs 0.512 at 1500); the world-model scaler skipped 4 of 15,000 steps as
   its overflow threshold fell during training (harmless). The effect on quality over
   a full 14k run is not yet measured; `"none"` restores fp32 with TF32 matmuls.
+- `PolicyCfg.seed_end_margin` (default 0): an imagined rollout is seeded only where
+  `frame + horizon + seed_end_margin < clip_end`, so its last state, which bootstraps
+  the critic targets and is the policy's terminal value, stays that many frames away
+  from the clip's last frame. The critic is fit on the first `horizon` states only,
+  so without a margin it is never fit on the last frames while still being evaluated
+  there; on libraries with many clips that end mid-motion (SEED, LAFAN cut into 5-s
+  chunks) that drove the critic loss to blow up after 1k–15k iterations. The SEED runs
+  use `--agent.policy.seed-end-margin 10` (training README section above); the last
+  `horizon + margin` frames of a clip are then never imagined.
 
 ## Known limitations and open items
 
