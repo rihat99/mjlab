@@ -1,0 +1,91 @@
+seed: 42
+num_steps_per_env: 1
+max_iterations: 100000
+obs_groups:
+  actor: !!python/tuple
+  - actor
+  critic: !!python/tuple
+  - critic
+save_interval: 4000
+experiment_name: seed_supermimic
+run_name: seed100k_margin10
+logger: local
+resume: false
+load_run: .*
+load_checkpoint: model_.*.pt
+clip_actions: null
+log_interval: 50
+model_interface: mjlab.tasks.tracking.supermimic.model_interface:TrackingModelInterface
+world_model:
+  hidden_dims: !!python/tuple
+  - 2048
+  - 2048
+  - 2048
+  window_k: 8
+  batches_per_update: 10
+  batch_size: 2048
+  lr: 0.0002
+  max_grad_norm: 1.0
+  nominal_floor: !!python/tuple
+  - 0.003
+  - 0.005
+  - 0.02
+  - 0.05
+  - 0.003
+  - 0.05
+  termination_head_hidden: !!python/tuple
+  - 256
+  - 128
+  termination_pos_weight: 1.0
+  running_statistics: true
+  statistics_horizon: 100
+policy:
+  encoder_hidden: !!python/tuple
+  - 2048
+  - 1024
+  - 512
+  - 256
+  latent_dim: 32
+  decoder_hidden: !!python/tuple
+  - 2048
+  - 1024
+  - 512
+  - 256
+  activation: elu
+  history_length: 10
+  lr: 0.0002
+  betas: !!python/tuple
+  - 0.9
+  - 0.95
+  max_grad_norm: 1.0
+  max_grad_value: 0.1
+  num_rollouts: 4096
+  horizon: 32
+  seed_end_margin: 10
+  gamma: 0.99
+  obs_normalization: true
+  normalizer_freeze_iteration: 20000
+  imagine_action_noise: true
+  analytic_termination: true
+critic:
+  hidden: !!python/tuple
+  - 256
+  - 128
+  lr: 0.0002
+  max_grad_norm: 1.0
+  epochs: 5
+  minibatches: 4
+  lam: 0.95
+collection:
+  action_noise_std: 0.1
+  replay_steps: 1000
+  sim_steps_per_iteration: 2.5
+  prefill_steps: 64
+  warmup_world_model_iterations: 500
+schedule:
+  lr_decay_iterations: 250000
+  lr_final_ratio: 0.03
+precision:
+  tf32: true
+  compile: true
+  autocast: bf16

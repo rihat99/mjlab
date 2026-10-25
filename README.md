@@ -225,6 +225,15 @@ nohup $PY tools/train_library.py --gpu 0 --iters 320000 --tag seed $SEED \
 $PY tools/train_library.py --eval --gpu 0 $SEED [--run-dir RUN]
 ```
 
+The trained SEED policy is in `checkpoints/seed100k_margin10/`: `model_100000.pt`
+(100,000 iterations on the 129,043 kept clips with `seed_end_margin 10`, bf16
+autocast, 4096 envs; normalised return 0.9605 and 4 failed clips on the full
+library) with its `params/agent.yaml` and `params/env.yaml`, so the folder serves as
+`--run-dir` for `--eval`, `--play` and `render_viser_supermimic.py`. It holds the
+policy, critic, world model and reset-sampler state but no optimizer states (the
+full 229 MB file exceeds GitHub's size limit), so it cannot resume training with
+`load_cfg={"optimizer": True}`.
+
 Play one clip headless and record `RUN/videos/play/rl-video-step-0.mp4` (one clip
 pass by default):
 
