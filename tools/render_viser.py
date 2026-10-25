@@ -1,30 +1,45 @@
-"""Rendering library for viser videos of an mjlab G1 rollout from a headless browser.
+"""Video engine of ``tools/view.py --video``: a SuperMimic rollout of one clip,
+rendered through viser in a headless browser.
+
+The rollout (``rollout``) is ``evaluate_library.py``'s protocol on this one clip: the
+task's play config (no observation noise, no randomization, foot friction 1.0, no
+reset noise, clips start at frame 0) with the clip as a one-clip library, 1 env, the
+checkpoint loaded with the task's runner (actor only), its deterministic policy,
+``env.reset()``, then steps until the clip's ``motion_end`` time-out or a fall. Kept
+after every physics substep (200 Hz): the robot pose and the actuator targets
+``data.ctrl``; per policy step: the reward and the reference frame the step is scored
+against (``MotionCommand.time_steps`` before the step; step k scores frame k), whose
+root pose and joint angles are the reference ghost. Both ghosts hold over the 4
+substeps of a policy step.
 
 The G1 meshes and materials come from mjlab's viser bridge (``MjlabViserScene`` on
 mjviser). Frames are rendered by a headless Chromium connected to a local viser
 server: hardware WebGL through ANGLE/Vulkan on a given GPU (or SwiftShader), at
-PIXEL_RATIO times the frame size and downsampled. A ghost G1 (``ghost_model_of``) is
-drawn in one colour with its meshes moved GHOST_INSET_M inward, so where ghost and
-robot coincide the ghost hides inside the robot instead of z-fighting with it. A
-caller blends a render without the ghost and one with an opaque ghost at
-GHOST_OPACITY: one ghost layer over whatever is behind it, free of the browser's
-per-mesh sorting. Every appearance setting (camera, colours, lights, floor, caption)
-is a constant under "Look" below.
+PIXEL_RATIO times the frame size and downsampled, one frame per policy step (50 fps,
+the state at the end of the step). A ghost G1 (``ghost_model_of``) is drawn in one
+colour with its meshes moved GHOST_INSET_M inward, so where ghost and robot coincide
+the ghost hides inside the robot instead of z-fighting with it. Each frame blends a
+render without the ghost and one with an opaque ghost at GHOST_OPACITY: one ghost
+layer over whatever is behind it, free of the browser's per-mesh sorting. Every
+appearance setting (camera, colours, lights, floor, caption) is a constant under
+"Look" below.
 
-The browser is a Chromium headless shell (``npx playwright install
-chromium-headless-shell``) or a wrapper script that execs one with ``--no-sandbox``;
-on a machine without ``libasound.so.2`` the wrapper puts an extracted copy of the
-library on ``LD_LIBRARY_PATH``.
+The browser is Playwright's Chromium headless shell (``find_chrome``) or any Chromium
+given by path, started with ``--no-sandbox``.
 """
 
 from __future__ import annotations
 
 import copy
 import os
+import shutil
 import signal
 import socket
 import subprocess
 import time
+from contextlib import ExitStack
+from dataclasses import asdict
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
@@ -68,7 +83,15 @@ GHOST_RGB, GHOST_OPACITY = (0.72, 0.12, 0.0), 0.4
 GHOST_INSET_M = 0.003  # ghost surfaces moved inward along their normals
 CAPTION_PX = HEIGHT // 32
 CAPTION_RGB, CAPTION_GHOST_RGB = (55, 60, 68), (225, 95, 0)
+# Blue-grey, deep enough to read at GHOST_OPACITY.
+REFERENCE_RGB, CAPTION_REFERENCE_RGB = (0.12, 0.34, 0.72), (30, 90, 190)
+GHOSTS = {  # ghost: (ghost colour, legend colour, legend)
+  "reference": (REFERENCE_RGB, CAPTION_REFERENCE_RGB, "blue = reference motion"),
+  "targets": (GHOST_RGB, CAPTION_GHOST_RGB, "orange = commanded joint targets"),
+}
 # --------------------------------------------------------------------------------------
+
+WINDOW_S = 20.0  # rendered seconds (the whole clip if shorter)
 
 GPU_FLAGS = [
   "--use-angle=vulkan",
@@ -78,6 +101,50 @@ GPU_FLAGS = [
 ]
 SOFTWARE_FLAGS = ["--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
 NVIDIA_VULKAN_ICD = "/usr/share/vulkan/icd.d/nvidia_icd.json"
+# Playwright's browser cache unless PLAYWRIGHT_BROWSERS_PATH is set, and the headless
+# shell's path in it.
+PLAYWRIGHT_CACHE = Path.home() / ".cache" / "ms-playwright"
+PLAYWRIGHT_SHELL = (
+  "chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell"
+)
+CHROME_INSTALL = "npx playwright install chromium-headless-shell"
+LIBASOUND_RECIPE = """\
+Chromium needs libasound.so.2, which this machine lacks. Install it
+(sudo apt install libasound2t64; libasound2 before Ubuntu 24.04), or without root:
+
+  cd $(mktemp -d) && apt-get download libasound2t64
+  dpkg-deb -x libasound2t64_*.deb ~/.local/libasound
+  export LD_LIBRARY_PATH=~/.local/libasound/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+
+and run again."""
+
+
+def find_chrome() -> str:
+  """The newest Chromium headless shell of the Playwright browser cache."""
+  cache = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", PLAYWRIGHT_CACHE))
+  shells = sorted(
+    cache.glob(PLAYWRIGHT_SHELL), key=lambda path: int(path.parts[-3].split("-")[-1])
+  )
+  if not shells:
+    raise SystemExit(
+      f"no Chromium headless shell in {cache}: install one with `{CHROME_INSTALL}` "
+      "or pass --chrome"
+    )
+  return str(shells[-1])
+
+
+def check_chrome(chrome: str) -> None:
+  """Exit with a clear message (and the libasound recipe) if ``chrome`` cannot run."""
+  if shutil.which(chrome) is None:
+    raise SystemExit(f"{chrome} is not an executable")
+  result = subprocess.run(
+    [chrome, "--no-sandbox", "--version"], capture_output=True, text=True, timeout=60
+  )
+  if result.returncode == 0:
+    return
+  if "libasound.so.2" in result.stderr:
+    raise SystemExit(LIBASOUND_RECIPE)
+  raise SystemExit(f"{chrome} --version failed: {result.stderr.strip()}")
 
 
 def camera_path(states: dict) -> tuple[np.ndarray, np.ndarray]:
@@ -280,6 +347,7 @@ class HeadlessBrowser:
     url = f"http://127.0.0.1:{self.server.get_port()}/?fixedDpr={PIXEL_RATIO}"
     command = [
       self.chrome,
+      "--no-sandbox",
       "--headless",
       f"--window-size={WIDTH},{HEIGHT}",
       "--hide-scrollbars",
@@ -350,3 +418,232 @@ def free_port() -> int:
   with socket.socket() as sock:
     sock.bind(("127.0.0.1", 0))
     return sock.getsockname()[1]
+
+
+def rollout(task: str, checkpoint: Path, motion: Path) -> dict:
+  """Play ``motion`` once from frame 0 with ``checkpoint`` (see the module docstring).
+
+  Keeps qpos and ctrl after every substep and, per policy step, the reward and the
+  reference pose the step is scored against.
+  """
+  import torch
+
+  import mjlab.tasks  # noqa: F401 -- registers the tasks
+  from mjlab.tasks.registry import load_rl_cfg, load_runner_cls
+  from mjlab.tasks.tracking.mdp.commands import MotionCommand
+  from mjlab.tasks.tracking.scripts.evaluate_library import make_library_env
+  from mjlab.tasks.tracking.supermimic.model_interface import max_step_reward
+  from mjlab.utils.torch import configure_torch_backends
+
+  configure_torch_backends()
+  agent_cfg = load_rl_cfg(task)
+  vec_env = make_library_env(task, [str(motion)], "cuda:0", agent_cfg.clip_actions)
+  runner_cls = load_runner_cls(task)
+  assert runner_cls is not None, f"{task} registers no runner"
+  runner = runner_cls(vec_env, asdict(agent_cfg), device="cuda:0")
+  runner.load(
+    str(checkpoint), load_cfg={"actor": True}, strict=True, map_location="cuda:0"
+  )
+  policy = runner.get_inference_policy(device="cuda:0")
+  env = vec_env.unwrapped
+  sim, robot = env.sim, env.scene["robot"]
+  command = cast(MotionCommand, env.command_manager.get_term("motion"))
+  if command.cfg.body_names[0] != "pelvis" or robot.body_names[0] != "pelvis":
+    raise RuntimeError("expected the pelvis (the free-joint root) as first body")
+  # (7,) root position, quaternion wxyz
+  free_q_adr = robot.indexing.free_joint_q_adr.cpu().numpy()
+  # (29,), robot joint order (the command's order)
+  joint_q_adr = robot.indexing.joint_q_adr.cpu().numpy()
+  max_reward = max_step_reward(env)
+
+  obs, _ = vec_env.reset()
+  sub_qpos, sub_ctrl = [], []
+  sim_step = sim.step  # the env's decimation loop calls sim.step once per substep
+
+  def step_and_keep() -> None:
+    sim_step()
+    sub_qpos.append(sim.data.qpos[0].cpu().numpy().astype(np.float64))
+    sub_ctrl.append(sim.data.ctrl[0].cpu().numpy().astype(np.float64))
+
+  sim.step = step_and_keep
+  step_frame, step_reward, step_ref_qpos = [], [], []
+  while True:
+    # The frame this step's reward is scored against.
+    step_frame.append(int(command.time_steps[0]))
+    ref_qpos = sim.data.qpos[0].cpu().numpy().astype(np.float64)
+    # Includes the env origin.
+    ref_qpos[free_q_adr[:3]] = command.body_pos_w[0, 0].cpu().numpy()
+    ref_qpos[free_q_adr[3:]] = command.body_quat_w[0, 0].cpu().numpy()
+    ref_qpos[joint_q_adr] = command.joint_pos[0].cpu().numpy()
+    step_ref_qpos.append(ref_qpos)
+    with torch.no_grad():
+      obs, reward, dones, _ = vec_env.step(policy(obs))
+    step_reward.append(float(reward[0]))
+    if bool(dones[0]):
+      failed = bool(env.termination_manager.terminated[0])
+      break
+  num_frames = int(command.motion.clip_end[0] - command.motion.clip_start[0])
+  states = {
+    "model": copy.deepcopy(sim.mj_model),
+    "free_q_adr": free_q_adr,
+    "sub_qpos": np.array(sub_qpos),
+    "sub_ctrl": np.array(sub_ctrl),
+    "step_frame": np.array(step_frame),
+    "step_reward": np.array(step_reward),
+    "step_ref_qpos": np.array(step_ref_qpos),
+    "failed": failed,
+    "num_frames": num_frames,
+    "max_step_reward": max_reward,
+    "normalized_return": sum(step_reward) / (max_reward * (num_frames - 1)),
+    "physics_dt": env.physics_dt,
+    "step_dt": env.step_dt,
+    "decimation": env.cfg.decimation,
+  }
+  vec_env.close()
+  return states
+
+
+def best_window(motion: Path, num_steps: int, last_frame: int) -> int:
+  """First scored frame of the ``num_steps`` frames (of 1 .. ``last_frame``) that
+  have the largest summed reference root speed."""
+  root_vel = np.load(motion)["body_lin_vel_w"][1 : last_frame + 1, 0]  # (last, 3)
+  speed = np.linalg.norm(root_vel, axis=1)
+  return 1 + int(np.argmax(np.convolve(speed, np.ones(num_steps), mode="valid")))
+
+
+def window_states(states: dict, first_frame: int, num_steps: int) -> dict:
+  """``states`` cut to the policy steps scoring frames ``first_frame`` ..
+  ``first_frame + num_steps - 1``.
+
+  Adds the per-substep reference pose ``sub_ref_qpos`` and the window's first
+  substep ``substep_offset``.
+  """
+  first_step = int(np.searchsorted(states["step_frame"], first_frame))
+  steps = slice(first_step, first_step + num_steps)
+  expected = np.arange(first_frame, first_frame + num_steps)
+  if not np.array_equal(states["step_frame"][steps], expected):
+    raise RuntimeError(
+      f"the rollout does not score frames {first_frame} .. "
+      f"{first_frame + num_steps - 1}"
+    )
+  decimation = states["decimation"]
+  substeps = slice(first_step * decimation, (first_step + num_steps) * decimation)
+  return {
+    **states,
+    "sub_qpos": states["sub_qpos"][substeps],
+    "sub_ctrl": states["sub_ctrl"][substeps],
+    "sub_ref_qpos": np.repeat(states["step_ref_qpos"][steps], decimation, axis=0),
+    "substep_offset": first_step * decimation,
+  }
+
+
+def render_video(
+  clip: str,
+  states: dict,
+  server: viser.ViserServer,
+  out_dir: Path,
+  ghost: str,
+  chrome: str,
+  gpu: int | None,
+  stills: list[float],
+) -> None:
+  """Render the policy-step frames of ``states`` (a ``window_states`` window) with
+  ``ghost`` (a GHOSTS key) into ``<out_dir>/<ghost>.mp4``.
+
+  With ``stills`` (clip times, s) only the PNG stills ``<ghost>_t<T>.png`` at the end
+  of the policy step nearest to each time. ``gpu`` None renders with SwiftShader.
+  """
+  import imageio_ffmpeg
+  import mediapy
+  import mujoco
+
+  # The ffmpeg shipped with imageio (there may be none on PATH).
+  mediapy.set_ffmpeg(imageio_ffmpeg.get_ffmpeg_exe())
+  model, decimation = states["model"], states["decimation"]
+  physics_dt = states["physics_dt"]
+  ghost_rgb, legend_rgb, legend = GHOSTS[ghost]
+  ghost_model = ghost_model_of(model, ghost_rgb)
+  if ghost == "reference":
+    ghost_qpos = states["sub_ref_qpos"]
+  else:
+    ghost_qpos = states["sub_qpos"].copy()
+    ghost_qpos[:, model.jnt_qposadr[model.actuator_trnid[:, 0]]] = states["sub_ctrl"]
+  data = mujoco.MjData(model)
+  positions, targets = camera_path(states)
+  background = Image.new("RGBA", (WIDTH, HEIGHT), (*BACKGROUND_RGB, 255))
+  offset = states["substep_offset"]
+  still_times = {
+    round(t / states["step_dt"]) * decimation - 1 - offset: t for t in stills
+  }
+  if not all(0 <= i < len(states["sub_qpos"]) for i in still_times):
+    raise ValueError(f"stills {stills} not all inside the window")
+  if still_times:
+    frames = sorted(still_times)
+  else:
+    frames = range(decimation - 1, len(states["sub_qpos"]), decimation)
+
+  def show(scene: MjlabViserScene, i: int, ghost_opacity: float | None) -> None:
+    data.qpos[:] = states["sub_qpos"][i]
+    mujoco.mj_kinematics(scene.mj_model, data)
+    scene.clear()
+    if ghost_opacity is not None:
+      scene.add_ghost_mesh(ghost_qpos[i], ghost_model, alpha=ghost_opacity, label=ghost)
+    scene.update_from_mjdata(data)
+
+  def frame_at(browser: HeadlessBrowser, scene: MjlabViserScene, i: int) -> np.ndarray:
+    show(scene, i, None)
+    plain = browser.render(positions[i], targets[i], background).astype(np.float32)
+    show(scene, i, 1.0)
+    opaque = browser.render(positions[i], targets[i], background).astype(np.float32)
+    return (plain + GHOST_OPACITY * (opaque - plain)).round().astype(np.uint8)
+
+  start = time.monotonic()
+  with ExitStack() as stack:
+    browser = stack.enter_context(HeadlessBrowser(server, chrome, gpu))
+    assert browser.client is not None  # set by __enter__
+    scene = build_scene(browser.client, model)
+    previous = frame_at(browser, scene, frames[0])
+    # Meshes load asynchronously in the browser: wait until two renders agree.
+    for _ in range(40):
+      time.sleep(0.25)
+      current = frame_at(browser, scene, frames[0])
+      if np.array_equal(current, previous):
+        break
+      previous = current
+    else:
+      raise RuntimeError("the browser's render did not settle")
+    print(
+      f"[view] {ghost}: browser ready after {time.monotonic() - start:.1f} s",
+      flush=True,
+    )
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    video = None
+    if not still_times:
+      video = stack.enter_context(
+        mediapy.VideoWriter(
+          out_dir / f"{ghost}.mp4",
+          shape=(HEIGHT, WIDTH),
+          fps=1.0 / states["step_dt"],
+          crf=18,
+        )
+      )
+    start = time.monotonic()
+    for i in frames:
+      t = (offset + i + 1) * physics_dt
+      frame = caption(
+        frame_at(browser, scene, i),
+        f"{clip}   SuperMimic   t = {t:6.2f} s",
+        legend,
+        legend_rgb,
+      )
+      if i in still_times:
+        Image.fromarray(frame).save(out_dir / f"{ghost}_t{still_times[i]:.2f}.png")
+      if video is not None:
+        video.add_image(frame)
+  elapsed = time.monotonic() - start
+  print(
+    f"[view] {ghost}: {len(frames)} frames in {elapsed:.0f} s "
+    f"({elapsed / len(frames):.2f} s per frame)",
+    flush=True,
+  )
