@@ -5,7 +5,9 @@ feasibility filter (264.56 h). A clip is kept when no stage below flags it.
 
 1. Name filter: case-insensitive substring match on the metadata ``filename`` with
    SONIC's 40 keywords (gear_sonic ``filter_and_copy_bones_data.py``) plus "50cm" and
-   "look_over_fence" (the paper's examples jump_off_50cm, look_over_fence).
+   "look_over_fence" (the paper's examples jump_off_50cm, look_over_fence), except
+   ``TRAINED_SONIC_TERMS``: cartwheels, handstands and the kozak dance need no prop, so
+   we keep them (a deviation from the paper, which drops them).
 2. Feasibility filter on the 50 Hz npz of ``tools/convert_seed.py``. zmin(t) is the
    lowest body-link origin (``body_pos_w`` z); a foot's height is the smallest
    ``mj_geomDistance`` between its 7 collision capsules and the floor plane.
@@ -15,9 +17,6 @@ feasibility filter (264.56 h). A clip is kept when no stage below flags it.
      pelvis is upright, at standing height and nearly still. The paper gives no gate
      thresholds; these are SuperMimic-Reproduced's: pelvis z-axis world z > 0.9,
      0.60 m < pelvis z < 0.85 m, pelvis speed < 0.1 m/s, joint speed RMS < 0.5 rad/s.
-3. Joint-step glitch filter (ours, not in the paper; the rule of the colleague's
-   SuperMimic-Reproduced pack): a clip is dropped when any joint changes by more than
-   1 rad between two consecutive 50 Hz frames (retargeting glitches survive 1 and 2).
 
 Writes ``<motions-dir>/manifest.json``: a summary (counts per stage and per reason,
 hours, hits per name term, the lower foot's height on gated frames of kept clips) and,
@@ -85,7 +84,12 @@ SONIC_TERMS = (
   "walking_on_edge",
   "push_obstacle",
 )
-NAME_TERMS = (*SONIC_TERMS, "50cm", "look_over_fence")
+TRAINED_SONIC_TERMS = ("cartwheel", "handstand", "handstand_ff_", "kozak_dance")
+NAME_TERMS = (
+  *(term for term in SONIC_TERMS if term not in TRAINED_SONIC_TERMS),
+  "50cm",
+  "look_over_fence",
+)
 FPS = 50
 ELEVATED_Z = 0.20
 ELEVATED_FRAMES = 30
@@ -99,7 +103,6 @@ STANDING_Z = (0.60, 0.85)
 STILL_SPEED = 0.1
 STILL_JOINT_RMS = 0.5
 FEASIBILITY = ("elevated_support", "ground_penetration", "floating_feet")
-JOINT_STEP = 1.0
 
 # Set in main() before the pool forks; each worker makes its own MjData.
 MODEL: mujoco.MjModel | None = None
@@ -167,13 +170,10 @@ def feasibility(path: Path) -> dict:
     or soft_fraction > PENETRATION_FRACTION,
     "floating_feet": floating_frames >= FLOATING_FRAMES,
   }
-  max_joint_step = float(np.abs(np.diff(joint_pos, axis=0)).max())
   return {
     "name": path.stem,
     "frames": frames,
-    "flags": [reason for reason in FEASIBILITY if flags[reason]]
-    + (["joint_step"] if max_joint_step > JOINT_STEP else []),
-    "max_joint_step": round(max_joint_step, 4),
+    "flags": [reason for reason in FEASIBILITY if flags[reason]],
     "zmin": round(float(zmin.min()), 4),
     "zmax_of_zmin": round(float(zmin.max()), 4),
     "elevated_frames": elevated_frames,
@@ -240,12 +240,6 @@ def main() -> None:
     reason: sum(reason in clips[name]["reasons"] for name in survivors)
     for reason in FEASIBILITY
   }
-  paper_kept = [
-    name
-    for name in survivors
-    if not any(reason in clips[name]["reasons"] for reason in FEASIBILITY)
-  ]
-  joint_step = [name for name in names if "joint_step" in clips[name]["reasons"]]
   first_match = {reason: 0 for reason in FEASIBILITY}
   for name in survivors:
     found = [reason for reason in FEASIBILITY if reason in clips[name]["reasons"]]
@@ -264,14 +258,9 @@ def main() -> None:
   summary = {
     "raw": len(names),
     "after_name_filter": len(survivors),
-    "after_feasibility_filter": len(paper_kept),
-    "after_joint_step_filter": len(kept),
+    "after_feasibility_filter": len(kept),
     "removed_by_name": len(names) - len(survivors),
-    "removed_by_feasibility": len(survivors) - len(paper_kept),
-    "removed_by_joint_step": len(paper_kept) - len(kept),
-    "joint_step_flags_all_clips": len(joint_step),
-    "joint_step_flags_already_removed_by_name_or_feasibility": len(joint_step)
-    - (len(paper_kept) - len(kept)),
+    "removed_by_feasibility": len(survivors) - len(kept),
     "feasibility_flags_among_name_survivors": flagged,
     "feasibility_first_match_elevated_penetration_floating": first_match,
     "kept_frames_50hz": kept_frames,
