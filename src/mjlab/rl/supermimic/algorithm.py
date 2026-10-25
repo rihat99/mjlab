@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn
+from torch._inductor import list_mode_options
 
 from mjlab.rl.supermimic.config import CriticCfg, PolicyCfg, WorldModelCfg
 from mjlab.rl.supermimic.interface import FloatingBaseState, ModelInterface
@@ -65,9 +66,16 @@ def lambda_returns(
   return torch.stack(returns[::-1])
 
 
-def _maybe_compile(fn: Callable, enabled: bool, mode: str | None = None) -> Callable:
-  """``torch.compile(fn, mode=mode)`` when enabled, else ``fn`` itself."""
-  return torch.compile(fn, mode=mode) if enabled else fn
+def _maybe_compile(fn: Callable, enabled: bool, mode: str = "default") -> Callable:
+  """``torch.compile(fn)`` with the inductor options of ``mode`` when enabled, else
+  ``fn`` itself.
+
+  Inductor's combo kernels are on: independent small kernels of a graph run as one
+  launch (same arithmetic, fewer launches)."""
+  if not enabled:
+    return fn
+  options = {**list_mode_options(mode), "combo_kernels": True}
+  return torch.compile(fn, options=options)
 
 
 def _maybe_autocast(fn: Callable, enabled: bool, device: torch.device) -> Callable:
@@ -152,6 +160,7 @@ class SuperMimic:
       _maybe_compile(world_model_loss, compile, graphs), autocast, self.device
     )
     self._state_heads = _maybe_compile(self.state_heads, compile)
+    self._history_frames = _maybe_compile(self.history_frames, compile)
     self._imagine_step = _maybe_autocast(
       _maybe_compile(self.imagine_step, compile, graphs), autocast, self.device
     )
@@ -204,13 +213,19 @@ class SuperMimic:
     gradient norm)."""
     cfg = self.world_model_cfg
     sums = torch.zeros(3, device=self.device)
-    # Sampling syncs with the host; drawing every batch up front (same random stream,
-    # nothing else draws in between) keeps those syncs out of the update loop.
+    # Sampling syncs with the host: every batch is drawn in one call, before the
+    # update loop. The windows are i.i.d., so consecutive slices are the batches.
+    sampled = buffer.sample_windows(
+      cfg.batch_size * cfg.batches_per_update, cfg.window_k
+    )
+    self.world_model.update_statistics_from_windows([sampled], self.iface)
     batches = [
-      buffer.sample_windows(cfg.batch_size, cfg.window_k)
-      for _ in range(cfg.batches_per_update)
+      {
+        key: value[i * cfg.batch_size : (i + 1) * cfg.batch_size]
+        for key, value in sampled.items()
+      }
+      for i in range(cfg.batches_per_update)
     ]
-    self.world_model.update_statistics_from_windows(batches, self.iface)
     for windows in batches:
       loss, last_error = self._world_model_loss(
         self.world_model, self.iface, windows, windows["context"]
@@ -237,6 +252,31 @@ class SuperMimic:
     """Invariant features (B, F) and goal (B, G) of states s (B, S) at frame (B,)."""
     return self.iface.invariant_features(s), self.iface.goal(s, frame)
 
+  def history_frames(
+    self,
+    states: torch.Tensor,
+    prev_actions: torch.Tensor,
+    context: torch.Tensor,
+    frames: torch.Tensor,
+    noise: torch.Tensor,
+  ) -> torch.Tensor:
+    """Noisy observation frames (B, history, obs_dim) of the seeds' histories.
+
+    Args:
+      states: (B, history, S) history states; prev_actions: (B, history, A) the
+        action executed before each; frames: (B, history) the frame shown with each.
+      context: (B, C) normalised sim context of each seed's episode.
+      noise: (B, history, obs_dim) observation noise.
+    """
+    num, history = frames.shape
+    obs = self.iface.actor_observation(
+      states.flatten(0, 1),
+      prev_actions.flatten(0, 1),
+      context.repeat_interleave(history, dim=0),
+      frames.flatten(),
+    )
+    return obs.view(num, history, -1) + noise
+
   def imagine_step(
     self,
     frames: torch.Tensor,
@@ -244,26 +284,31 @@ class SuperMimic:
     s: torch.Tensor,
     features: torch.Tensor,
     context: torch.Tensor,
-    next_frame: torch.Tensor,
-  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """One imagined step without its observation noise (the caller adds it).
+    frame: torch.Tensor,
+    noise: torch.Tensor,
+  ) -> tuple[torch.Tensor, ...]:
+    """One imagined step.
 
     Args:
       frames: (B, history, obs_dim) noisy observation frames, oldest first.
       goal: (B, G) goal of ``s``.
       s: (B, S) state; features: (B, F) its invariant features.
       context: (B, C) normalised sim context of each row's episode.
-      next_frame: (B,) frame the next observation targets.
+      frame: (B,) goal frame k_t of ``s``.
+      noise: (B, obs_dim) observation noise of s_next's frame.
 
     Returns:
-      action a (B, A) (noise-free, paper Alg. A.1), s_next (B, S), noise-free
-      observation of s_next (B, obs_dim), features (B, F) and goal (B, G) of s_next.
+      action a (B, A) (noise-free, paper Alg. A.1), s_next (B, S), the frames
+      shifted by s_next's noisy observation (B, history, obs_dim), its goal frame
+      k_{t+1} (B,), features (B, F) and goal (B, G) of s_next.
     """
     action = self.policy.forward_frames(frames, goal)
     s_next = self.world_model.step(s, features, action, context)
-    obs = self.iface.actor_observation(s_next, action, context, next_frame)
+    next_frame = frame + 1
+    obs = self.iface.actor_observation(s_next, action, context, next_frame) + noise
+    next_frames = torch.cat((frames[:, 1:], obs.unsqueeze(1)), dim=1)
     next_features, next_goal = self.state_heads(s_next, next_frame)
-    return action, s_next, obs, next_features, next_goal
+    return action, s_next, next_frames, next_frame, next_features, next_goal
 
   def policy_objective(
     self,
@@ -345,14 +390,21 @@ class SuperMimic:
     )
     context = seeds["context"]
     num = context.shape[0]
+    history = cfg.history_length
+    # The sensor noise is additive and independent of the observation: the seed
+    # histories' and every imagined step's are drawn at once, as noise on zeros.
+    zeros = torch.zeros(
+      (history + cfg.horizon) * num, iface.obs_dim, device=self.device
+    )
+    noise = iface.add_observation_noise(zeros).view(-1, num, iface.obs_dim)
     with torch.no_grad():
-      hist_states = seeds["state_hist"].flatten(0, 1)
-      hist_actions = seeds["prev_action_hist"].flatten(0, 1)
-      hist_context = context.repeat_interleave(cfg.history_length, dim=0)
-      hist_frames = seeds["frame_hist"].flatten()
-      frames = iface.add_observation_noise(
-        iface.actor_observation(hist_states, hist_actions, hist_context, hist_frames)
-      ).view(num, cfg.history_length, iface.obs_dim)
+      frames = self._history_frames(
+        seeds["state_hist"],
+        seeds["prev_action_hist"],
+        context,
+        seeds["frame_hist"],
+        noise[:history].transpose(0, 1),
+      )
 
     frozen = (self.world_model, self.critic)
     for module in frozen:
@@ -366,20 +418,17 @@ class SuperMimic:
     # goals also hold the start state, so they have horizon + 1 entries.
     states, actions, prev_actions, reward_frames = [], [], [], []
     feature_list, goal_list = [features], [goal]
-    for _ in range(cfg.horizon):
-      action, s_next, obs, features, goal = self._imagine_step(
-        frames, goal, s, features, context, frame + 1
+    for t in range(cfg.horizon):
+      action, s_next, frames, next_frame, features, goal = self._imagine_step(
+        frames, goal, s, features, context, frame, noise[history + t]
       )
-      obs = iface.add_observation_noise(obs)
-      frames = torch.cat((frames[:, 1:], obs.unsqueeze(1)), dim=1)
       states.append(s_next)
       actions.append(action)
       prev_actions.append(a_prev)
       reward_frames.append(frame)
-      frame = frame + 1
       feature_list.append(features)
       goal_list.append(goal)
-      s, a_prev = s_next, action
+      s, a_prev, frame = s_next, action, next_frame
 
     (
       loss,
