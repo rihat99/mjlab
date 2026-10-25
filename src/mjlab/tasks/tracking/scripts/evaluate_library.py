@@ -20,16 +20,26 @@ longest first so that the clips of a wave end at similar steps; an env that fini
 its clip early replays it unscored until the wave ends. The results JSON (written
 compact) holds the aggregates and one record per clip.
 
+Several checkpoints are evaluated in one process, on one env (the library loads once):
+a tuple of ``--checkpoint-file`` paths, or ``--run-dir`` for every ``model_<it>.pt`` of
+a run. Each gets its own JSON, which also records the checkpoint's iteration, file
+mtime and the run's training wall-clock at that iteration (``training_seconds``).
+
   python -m mjlab.tasks.tracking.scripts.evaluate_library <task> \
     --checkpoint-file <run>/model_4000.pt --motion-files "('a.npz', 'b.npz')"
   # large library: a .txt file listing the npz paths, one per line
   python -m mjlab.tasks.tracking.scripts.evaluate_library <task> \
     --checkpoint-file <run>/model_4000.pt --motion-files library.txt
+  # every checkpoint of a run (or --checkpoint-file "('<run>/a.pt', '<run>/b.pt')")
+  python -m mjlab.tasks.tracking.scripts.evaluate_library <task> \
+    --run-dir <run> --motion-files library.txt
 """
 
 from __future__ import annotations
 
+import csv
 import json
+import re
 import sys
 import time
 from collections.abc import Callable, Sequence
@@ -43,6 +53,7 @@ from tensordict import TensorDict
 
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
+from mjlab.rl.local_log_writer import TRAINING_SECONDS
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
 from mjlab.tasks.tracking.mdp.commands import MotionCommand, expand_motion_files
@@ -51,25 +62,32 @@ from mjlab.utils.torch import configure_torch_backends
 
 # Failed clips listed on stdout; all of them are in the JSON.
 MAX_PRINTED_FAILURES = 50
+CHECKPOINT_NAME = re.compile(r"model_(\d+)\.pt")
+# Training time of runs whose metrics.csv predates the TRAINING_SECONDS column.
+ITERATION_TIMES = "Perf/collection_time + Perf/learning_time"
 
 
 @dataclass(frozen=True)
 class EvaluateLibraryConfig:
   """Configuration for library evaluation."""
 
-  checkpoint_file: str
-  """Local checkpoint to evaluate (e.g. '<run_dir>/model_4000.pt')."""
   # tuple first, as MotionCommandCfg.motion_file: a single path parses as a str.
   motion_files: tuple[str, ...] | str
   """Motion npz files of the library as a Python tuple literal, or a .txt file listing
   them (one path per line)."""
+  checkpoint_file: tuple[str, ...] | str = ()
+  """Local checkpoint to evaluate (e.g. '<run_dir>/model_4000.pt'), or a Python tuple
+  literal of several, evaluated in that order."""
+  run_dir: str | None = None
+  """Evaluate every 'model_<it>.pt' of this run directory, in iteration order, instead
+  of --checkpoint-file."""
   num_envs: int = 4096
   """Parallel envs; more clips than this are played in waves."""
   device: str | None = None
   """Device to run on. Defaults to CUDA if available."""
   output_json: str | None = None
-  """Path of the results JSON. Defaults to 'eval_library_<checkpoint stem>.json'
-  next to the checkpoint."""
+  """Path of the results JSON of a single checkpoint. Defaults to
+  'eval_library_<checkpoint stem>.json' next to each checkpoint."""
 
 
 def make_library_env(
@@ -212,15 +230,72 @@ def evaluate_library(
   }
 
 
-def run_evaluate_library(task_id: str, cfg: EvaluateLibraryConfig) -> dict[str, Any]:
-  """Load the checkpoint with the task's runner and evaluate it on the library."""
+def checkpoint_files(cfg: EvaluateLibraryConfig) -> list[Path]:
+  """The checkpoints of ``cfg``: every ``model_<it>.pt`` of ``cfg.run_dir`` by
+  iteration, else ``cfg.checkpoint_file`` in the given order."""
+  given = (
+    (cfg.checkpoint_file,)
+    if isinstance(cfg.checkpoint_file, str)
+    else cfg.checkpoint_file
+  )
+  if (cfg.run_dir is None) == (not given):
+    raise ValueError("Give either --checkpoint-file or --run-dir.")
+  if cfg.run_dir is None:
+    return [Path(path) for path in given]
+  found = {
+    int(match.group(1)): path
+    for path in Path(cfg.run_dir).glob("model_*.pt")
+    if (match := CHECKPOINT_NAME.fullmatch(path.name))
+  }
+  if not found:
+    raise FileNotFoundError(f"No model_<it>.pt in {cfg.run_dir}")
+  return [found[iteration] for iteration in sorted(found)]
+
+
+def training_seconds(checkpoint: Path) -> tuple[float | None, str | None]:
+  """Training wall-clock of the run at ``model_<it>.pt`` and the column it comes from.
+
+  Read from ``metrics.csv`` next to the checkpoint, on the last row logged before the
+  save (iteration it - 1). A run logged before the ``TRAINING_SECONDS`` column existed
+  gives the sum of its logged iteration times (``ITERATION_TIMES``, without the replay
+  prefill and checkpoint saves). ``(None, None)`` without metrics.csv or for another
+  file name.
+  """
+  match = CHECKPOINT_NAME.fullmatch(checkpoint.name)
+  metrics = checkpoint.parent / "metrics.csv"
+  if match is None or not metrics.is_file():
+    return None, None
+  with open(metrics, newline="") as handle:
+    rows = [
+      row
+      for row in csv.DictReader(handle)
+      if row["iteration"] and int(row["iteration"]) < int(match.group(1))
+    ]
+  if not rows:
+    return None, None
+  if rows[-1].get(TRAINING_SECONDS):
+    return float(rows[-1][TRAINING_SECONDS]), TRAINING_SECONDS
+  iteration_times = sum(
+    float(row["Perf/collection_time"]) + float(row["Perf/learning_time"])
+    for row in rows
+  )
+  return iteration_times, ITERATION_TIMES
+
+
+def run_evaluate_library(
+  task_id: str, cfg: EvaluateLibraryConfig
+) -> list[dict[str, Any]]:
+  """Load the library once and evaluate each checkpoint of ``cfg`` on it with the
+  task's runner; return the results in checkpoint order."""
   configure_torch_backends()
   device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
-  checkpoint = Path(cfg.checkpoint_file)
+  checkpoints = checkpoint_files(cfg)
+  if cfg.output_json is not None and len(checkpoints) > 1:
+    raise ValueError("--output-json needs a single checkpoint.")
   motion_files = (
     (cfg.motion_files,) if isinstance(cfg.motion_files, str) else cfg.motion_files
   )
-  for path in (checkpoint, *map(Path, motion_files)):
+  for path in (*checkpoints, *map(Path, motion_files)):
     if not path.is_file():
       raise FileNotFoundError(f"File not found: {path}")
   missing = [f for f in expand_motion_files(motion_files) if not Path(f).is_file()]
@@ -237,40 +312,51 @@ def run_evaluate_library(task_id: str, cfg: EvaluateLibraryConfig) -> dict[str, 
   )
   runner_cls = load_runner_cls(task_id) or MjlabOnPolicyRunner
   runner = runner_cls(env, asdict(agent_cfg), device=device)
-  runner.load(
-    str(checkpoint), load_cfg={"actor": True}, strict=True, map_location=device
-  )
-  policy = runner.get_inference_policy(device=device)
 
-  result = evaluate_library(env, policy)
-  result["provenance"] = {
-    "task": task_id,
-    "checkpoint_file": str(checkpoint.resolve()),
-    "motion_files": [str(Path(f).resolve()) for f in motion_files],
-  }
-  output = Path(
-    cfg.output_json or checkpoint.with_name(f"eval_library_{checkpoint.stem}.json")
-  )
-  output.parent.mkdir(parents=True, exist_ok=True)
-  output.write_text(json.dumps(result))
-  print(
-    f"[INFO] normalised return per clip length: mean "
-    f"{result['mean_normalized_return']:.4f}, frame-weighted "
-    f"{result['frame_weighted_normalized_return']:.4f}; per survived step: mean "
-    f"{result['mean_normalized_return_survived']:.4f}, frame-weighted "
-    f"{result['frame_weighted_normalized_return_survived']:.4f}; "
-    f"failed {result['num_failed']}/{len(result['clips'])}; saved {output}"
-  )
-  failures = [record for record in result["clips"] if record["failed"]]
-  for record in failures[:MAX_PRINTED_FAILURES]:
-    print(
-      f"[INFO] failed: {record['clip']} at frame {record['steps']}: "
-      f"{', '.join(record['fired'])}"
+  results = []
+  for checkpoint in checkpoints:
+    runner.load(
+      str(checkpoint), load_cfg={"actor": True}, strict=True, map_location=device
     )
-  if len(failures) > MAX_PRINTED_FAILURES:
-    print(f"[INFO] ... {len(failures) - MAX_PRINTED_FAILURES} more failed clips")
+    policy = runner.get_inference_policy(device=device)
+    result = evaluate_library(env, policy)
+    match = CHECKPOINT_NAME.fullmatch(checkpoint.name)
+    seconds, seconds_from = training_seconds(checkpoint)
+    result |= {
+      "iteration": int(match.group(1)) if match else None,
+      "checkpoint_mtime": checkpoint.stat().st_mtime,
+      "training_seconds": seconds,
+      "training_seconds_from": seconds_from,
+      "provenance": {
+        "task": task_id,
+        "checkpoint_file": str(checkpoint.resolve()),
+        "motion_files": [str(Path(f).resolve()) for f in motion_files],
+      },
+    }
+    output = Path(
+      cfg.output_json or checkpoint.with_name(f"eval_library_{checkpoint.stem}.json")
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(result))
+    print(
+      f"[INFO] normalised return per clip length: mean "
+      f"{result['mean_normalized_return']:.4f}, frame-weighted "
+      f"{result['frame_weighted_normalized_return']:.4f}; per survived step: mean "
+      f"{result['mean_normalized_return_survived']:.4f}, frame-weighted "
+      f"{result['frame_weighted_normalized_return_survived']:.4f}; "
+      f"failed {result['num_failed']}/{len(result['clips'])}; saved {output}"
+    )
+    failures = [record for record in result["clips"] if record["failed"]]
+    for record in failures[:MAX_PRINTED_FAILURES]:
+      print(
+        f"[INFO] failed: {record['clip']} at frame {record['steps']}: "
+        f"{', '.join(record['fired'])}"
+      )
+    if len(failures) > MAX_PRINTED_FAILURES:
+      print(f"[INFO] ... {len(failures) - MAX_PRINTED_FAILURES} more failed clips")
+    results.append(result)
   env.close()
-  return result
+  return results
 
 
 def main():

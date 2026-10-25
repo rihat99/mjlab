@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import math
 import os
+import time
 from pathlib import Path
 
 from matplotlib.figure import Figure
@@ -24,24 +25,31 @@ _PLOTTED_PREFIXES = (
 # plotted tag gets its own panel.
 _GROUPED_PREFIXES = ("Episode_Reward/", "Episode_Termination/")
 _NUM_PANEL_COLUMNS = 4
+# metrics.csv column: wall-clock seconds from the writer's creation, i.e. from the
+# start of the runner's learn(), to the iteration's first logged scalar.
+TRAINING_SECONDS = "training_wall_seconds"
 
 
 class LocalLogWriter(SummaryWriter, LogWriter):
   """TensorBoard writer that also keeps ``metrics.csv`` and ``curves.png``.
 
-  ``metrics.csv`` has one row per iteration and one column per scalar tag. A tag
-  that first appears late gets a new column and the file is rewritten. A row is
-  written once the next iteration starts logging, or at a checkpoint save or at
-  stop. ``curves.png`` is redrawn at every checkpoint save and at stop.
+  ``metrics.csv`` has one row per logged iteration, the ``TRAINING_SECONDS`` column
+  (wall-clock seconds since training started: replay prefill, compilation and
+  checkpoint saves included, env and library setup excluded) and one column per
+  scalar tag. A tag that first appears late gets a new column and the file is
+  rewritten. A row is written once the next iteration starts logging, or at a
+  checkpoint save or at stop. ``curves.png`` is redrawn at every checkpoint save and
+  at stop.
   """
 
   def __init__(self, log_dir: str, flush_secs: int = 10) -> None:
     super().__init__(log_dir=log_dir, flush_secs=flush_secs)
     self._csv_path = Path(log_dir) / "metrics.csv"
     self._png_path = Path(log_dir) / "curves.png"
-    self._columns: list[str] = ["iteration"]
+    self._columns: list[str] = ["iteration", TRAINING_SECONDS]
     self._rows: list[dict[str, float]] = []
     self._current: dict[str, float] = {}
+    self._start_time = time.monotonic()
 
   def add_scalar(
     self,
@@ -60,6 +68,8 @@ class LocalLogWriter(SummaryWriter, LogWriter):
       return
     if self._current and self._current["iteration"] != global_step:
       self._write_row()
+    if not self._current:
+      self._current[TRAINING_SECONDS] = time.monotonic() - self._start_time
     self._current["iteration"] = global_step
     self._current[tag] = float(scalar_value)
 

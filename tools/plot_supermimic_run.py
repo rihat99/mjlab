@@ -10,7 +10,8 @@ evaluations:
 
 - ``training_curves.png``: 8 panels of a 3x3 grid vs iteration (world-model loss,
   policy / critic losses, imagined rollout statistics, simulator return, episode
-  length, sampler statistics, time per iteration split by phase);
+  length, sampler statistics, time per iteration split by phase); curves a run has
+  not logged (the policy's before the world-model warm-up ends) are left out;
 - ``library_eval.png``: mean and frame-weighted normalised return per clip length
   (solid) and per survived step (dashed, when the JSON has it), and number of failed
   clips, vs checkpoint iteration;
@@ -18,10 +19,14 @@ evaluations:
   of the normalised return, a black cross on the cells of failed clips; for a library
   of more than 60 clips only the 60 with the lowest return at the last checkpoint.
 
+``--hours``: the training curves and ``library_eval.png`` against training wall-clock
+hours (metrics.csv's ``training_wall_seconds``; runs logged before that column use the
+sum of the logged iteration times, about 1 % less) instead of iterations.
+
 The run directory is only read, so it can be called on a run that is still training.
 
     PY=<worktree>/.venv/bin/python
-    $PY tools/plot_supermimic_run.py <run_dir> [--out DIR]
+    $PY tools/plot_supermimic_run.py <run_dir> [--out DIR] [--hours]
 """
 
 from __future__ import annotations
@@ -41,6 +46,8 @@ import numpy as np
 DPI = 150
 MAX_HEATMAP_CLIPS = 60
 EVAL_NAME = re.compile(r"eval_library_model_(\d+)\.json")
+# metrics.csv column of mjlab.rl.local_log_writer.LocalLogWriter.
+TRAINING_SECONDS = "training_wall_seconds"
 
 
 def read_metrics(path: Path) -> dict[str, np.ndarray]:
@@ -53,6 +60,18 @@ def read_metrics(path: Path) -> dict[str, np.ndarray]:
     )
     for column in rows[0]
   }
+
+
+def training_hours(metrics: dict[str, np.ndarray]) -> tuple[np.ndarray, str]:
+  """Training wall-clock hours at each metrics row ``(n_rows,)`` and its axis label.
+
+  Runs logged before the ``TRAINING_SECONDS`` column: the cumulative logged iteration
+  time, which leaves out the replay prefill and checkpoint saves.
+  """
+  if TRAINING_SECONDS in metrics:
+    return metrics[TRAINING_SECONDS] / 3600, "training wall-clock (h)"
+  seconds = np.cumsum(metrics["Perf/collection_time"] + metrics["Perf/learning_time"])
+  return seconds / 3600, "training time (h, sum of iteration times)"
 
 
 def read_evals(run_dir: Path) -> list[dict]:
@@ -75,19 +94,22 @@ def read_evals(run_dir: Path) -> list[dict]:
 
 def plot_line(
   ax,
-  iteration: np.ndarray,
-  values: np.ndarray,
+  x: np.ndarray,
+  values: np.ndarray | None,
   label: str,
   color: str,
   linestyle: str = "-",
 ) -> None:
-  """Plot ``values`` against ``iteration``, dropping the nan rows.
+  """Plot ``values`` against ``x``, dropping the nan rows; nothing for None.
 
-  The policy columns are empty before the policy trains.
+  The policy columns are empty before the policy trains and absent from a run that
+  stopped before it did.
   """
+  if values is None:
+    return
   valid = ~np.isnan(values)
   ax.plot(
-    iteration[valid],
+    x[valid],
     values[valid],
     color=color,
     linestyle=linestyle,
@@ -96,10 +118,10 @@ def plot_line(
   )
 
 
-def style_axis(ax, title: str, ylabel: str, log: bool = False) -> None:
+def style_axis(ax, title: str, xlabel: str, ylabel: str, log: bool = False) -> None:
   """Title, labels and grid of every training-curve panel; ``log``: log-scale y."""
   ax.set_title(title, fontsize=13)
-  ax.set_xlabel("training iteration")
+  ax.set_xlabel(xlabel)
   ax.set_ylabel(ylabel)
   ax.grid(alpha=0.3)
   if log:
@@ -122,24 +144,28 @@ def merge_legends(ax, twin_ax) -> None:
 
 
 def plot_training_curves(
-  metrics: dict[str, np.ndarray], out_path: Path, title: str
+  metrics: dict[str, np.ndarray], x: np.ndarray, xlabel: str, out_path: Path, title: str
 ) -> None:
-  """3x3 grid of the training curves of ``metrics`` (``read_metrics``), saved."""
-  it = metrics["iteration"]
+  """3x3 grid of the training curves of ``metrics`` (``read_metrics``) against ``x``
+  (one value per row, e.g. the iteration), saved."""
   blue, orange, green, red = "tab:blue", "tab:orange", "tab:green", "tab:red"
   fig, axes = plt.subplots(3, 3, figsize=(18, 14))
 
   ax = axes[0, 0]
-  plot_line(ax, it, metrics["Loss/world_model_state"], "state loss", blue)
+  plot_line(ax, x, metrics.get("Loss/world_model_state"), "state loss", blue)
   style_axis(
-    ax, "World model: state loss and rollout error", "state loss (log)", log=True
+    ax,
+    "World model: state loss and rollout error",
+    xlabel,
+    "state loss (log)",
+    log=True,
   )
   ax.tick_params(axis="y", colors=blue)
   twin_ax = twin(ax, "error of the last step of the imagined rollout (log)", orange)
   plot_line(
     twin_ax,
-    it,
-    metrics["Metrics/world_model_last_step_error"],
+    x,
+    metrics.get("Metrics/world_model_last_step_error"),
     "last-step error",
     orange,
   )
@@ -147,48 +173,57 @@ def plot_training_curves(
   merge_legends(ax, twin_ax)
 
   ax = axes[0, 1]
-  plot_line(ax, it, metrics["Loss/policy"], "policy loss", blue)
-  style_axis(ax, "Policy loss and gradient norm", "policy loss")
+  plot_line(ax, x, metrics.get("Loss/policy"), "policy loss", blue)
+  style_axis(ax, "Policy loss and gradient norm", xlabel, "policy loss")
   ax.tick_params(axis="y", colors=blue)
   twin_ax = twin(ax, "policy gradient norm", orange)
-  plot_line(twin_ax, it, metrics["Metrics/policy_grad_norm"], "grad norm", orange)
+  plot_line(twin_ax, x, metrics.get("Metrics/policy_grad_norm"), "grad norm", orange)
   merge_legends(ax, twin_ax)
 
   ax = axes[0, 2]
   plot_line(
     ax,
-    it,
-    metrics["Metrics/imagined_reward_normalized"],
+    x,
+    metrics.get("Metrics/imagined_reward_normalized"),
     "imagined reward (normalised by max)",
     blue,
   )
-  plot_line(ax, it, metrics["Metrics/imagined_survival"], "imagined survival", green)
-  style_axis(ax, "Imagined rollouts", "fraction (0 to 1)")
+  plot_line(ax, x, metrics.get("Metrics/imagined_survival"), "imagined survival", green)
+  style_axis(ax, "Imagined rollouts", xlabel, "fraction (0 to 1)")
   ax.legend(fontsize=9, loc="best")
 
   ax = axes[1, 0]
-  plot_line(ax, it, metrics["Loss/critic"], "critic loss", blue)
-  style_axis(ax, "Critic loss", "critic loss (log)", log=True)
+  plot_line(ax, x, metrics.get("Loss/critic"), "critic loss", blue)
+  style_axis(ax, "Critic loss", xlabel, "critic loss (log)", log=True)
 
   ax = axes[1, 1]
-  plot_line(ax, it, metrics["Train/normalized_return"], "normalised return", blue)
-  plot_line(ax, it, metrics["Train/termination_rate"], "termination rate", red)
+  plot_line(ax, x, metrics.get("Train/normalized_return"), "normalised return", blue)
+  plot_line(ax, x, metrics.get("Train/termination_rate"), "termination rate", red)
   style_axis(
-    ax, "Simulator training episodes", "normalised return / termination rate (0 to 1)"
+    ax,
+    "Simulator training episodes",
+    xlabel,
+    "normalised return / termination rate (0 to 1)",
   )
   ax.legend(fontsize=9, loc="best")
 
   ax = axes[1, 2]
-  plot_line(ax, it, metrics["Train/mean_episode_length"], "mean episode length", blue)
-  style_axis(ax, "Episode length", "mean episode length (steps)")
+  plot_line(
+    ax, x, metrics.get("Train/mean_episode_length"), "mean episode length", blue
+  )
+  style_axis(ax, "Episode length", xlabel, "mean episode length (steps)")
 
   ax = axes[2, 0]
-  plot_line(ax, it, metrics["Metrics/sampler_reset_entropy"], "reset entropy", blue)
-  style_axis(ax, "Reset sampler", "entropy of the reset distribution")
+  plot_line(ax, x, metrics.get("Metrics/sampler_reset_entropy"), "reset entropy", blue)
+  style_axis(ax, "Reset sampler", xlabel, "entropy of the reset distribution")
   ax.tick_params(axis="y", colors=blue)
   twin_ax = twin(ax, "mean bin return", orange)
   plot_line(
-    twin_ax, it, metrics["Metrics/sampler_mean_bin_return"], "mean bin return", orange
+    twin_ax,
+    x,
+    metrics.get("Metrics/sampler_mean_bin_return"),
+    "mean bin return",
+    orange,
   )
   handles, labels = ax.get_legend_handles_labels()
   twin_handles, twin_labels = twin_ax.get_legend_handles_labels()
@@ -209,7 +244,7 @@ def plot_training_curves(
     ("Perf/critic_time", "critic"),
   ]
   ax.stackplot(
-    it,
+    x,
     [np.nan_to_num(metrics[key]) for key, _ in phases],
     labels=[label for _, label in phases],
     alpha=0.85,
@@ -219,7 +254,10 @@ def plot_training_curves(
   # steady-state split, so clip them.
   ax.set_ylim(0, 1.6 * np.median(total_time))
   style_axis(
-    ax, "Time per iteration (one-off spikes clipped)", "seconds per iteration (stacked)"
+    ax,
+    "Time per iteration (one-off spikes clipped)",
+    xlabel,
+    "seconds per iteration (stacked)",
   )
   ax.legend(fontsize=9, loc="upper left")
   axes[2, 2].axis("off")
@@ -230,24 +268,31 @@ def plot_training_curves(
   plt.close(fig)
 
 
-def plot_library_eval(evals: list[dict], out_path: Path, title: str) -> None:
-  """Normalised return and failed clip count vs checkpoint iteration.
+def plot_library_eval(
+  evals: list[dict],
+  out_path: Path,
+  title: str,
+  hours: tuple[list[float], str] | None = None,
+) -> None:
+  """Normalised return and failed clip count vs checkpoint iteration, or vs
+  ``hours = (training hours per eval, axis label)``.
 
   Mean and frame-weighted, per clip length and (when the JSON has it) per survived step.
   """
   iterations = [evaluation["iteration"] for evaluation in evals]
+  x = iterations if hours is None else hours[0]
   num_clips = max(evaluation["num_clips"] for evaluation in evals)
   fig, (ax_return, ax_failed) = plt.subplots(1, 2, figsize=(14, 5.5))
 
   ax_return.plot(
-    iterations,
+    x,
     [e["mean_normalized_return"] for e in evals],
     "o-",
     color="tab:blue",
     label="mean over clips, per clip length",
   )
   ax_return.plot(
-    iterations,
+    x,
     [e["frame_weighted_normalized_return"] for e in evals],
     "s-",
     color="tab:orange",
@@ -270,20 +315,23 @@ def plot_library_eval(evals: list[dict], out_path: Path, title: str) -> None:
   ):
     values = [e.get(key, np.nan) for e in evals]
     if not np.all(np.isnan(values)):
-      ax_return.plot(iterations, values, marker, color=color, label=label)
+      ax_return.plot(x, values, marker, color=color, label=label)
   ax_return.set_ylim(0, 1)
   ax_return.set_title("Library evaluation: normalised return", fontsize=13)
   ax_return.set_ylabel("normalised return (1 = full reward at every frame)")
   ax_return.legend()
 
-  ax_failed.plot(iterations, [e["num_failed"] for e in evals], "o-", color="tab:red")
+  ax_failed.plot(x, [e["num_failed"] for e in evals], "o-", color="tab:red")
   ax_failed.set_ylim(0, num_clips)
   ax_failed.set_title(f"Library evaluation: failed clips (of {num_clips})", fontsize=13)
   ax_failed.set_ylabel("number of failed clips")
 
   for ax in (ax_return, ax_failed):
-    ax.set_xlabel("checkpoint iteration")
-    ax.set_xticks(iterations)
+    if hours is None:
+      ax.set_xlabel("checkpoint iteration")
+      ax.set_xticks(iterations)
+    else:
+      ax.set_xlabel(hours[1])
     ax.grid(alpha=0.3)
   fig.suptitle(title, fontsize=15)
   fig.tight_layout(rect=(0, 0, 1, 0.95))
@@ -380,6 +428,11 @@ def main() -> None:
     default=None,
     help="output directory (default <run_dir>/figures)",
   )
+  parser.add_argument(
+    "--hours",
+    action="store_true",
+    help="x axis in training wall-clock hours instead of iterations",
+  )
   args = parser.parse_args()
 
   out_dir = args.out if args.out is not None else args.run_dir / "figures"
@@ -387,11 +440,19 @@ def main() -> None:
   title = args.run_dir.name
 
   metrics = read_metrics(args.run_dir / "metrics.csv")
-  plot_training_curves(metrics, out_dir / "training_curves.png", title)
+  x, xlabel = metrics["iteration"], "training iteration"
+  if args.hours:
+    x, xlabel = training_hours(metrics)
+  plot_training_curves(metrics, x, xlabel, out_dir / "training_curves.png", title)
   evals = read_evals(args.run_dir)
   if not evals:
     raise SystemExit(f"no eval_library_model_*.json in {args.run_dir}")
-  plot_library_eval(evals, out_dir / "library_eval.png", title)
+  hours = None
+  if args.hours:
+    # model_<it>.pt is saved right after the row of iteration it - 1.
+    eval_hours = np.interp([e["iteration"] - 1 for e in evals], metrics["iteration"], x)
+    hours = (eval_hours.tolist(), xlabel)
+  plot_library_eval(evals, out_dir / "library_eval.png", title, hours)
   plot_per_clip_eval(evals, out_dir / "per_clip_eval.png", title)
   print(markdown_table(evals))
   print(f"\nfigures in {out_dir}")
