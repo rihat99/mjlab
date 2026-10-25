@@ -16,6 +16,12 @@ benchmark_results/
 checkpoints/*/eval_library_*.json
 checkpoints/*/figures/
 
+# Local SuperMimic data, training runs, rendered videos and trashed files.
+/data/
+/runs/
+/videos/
+/trash/
+
 # Documentation outputs.
 **/_build/*
 **/generated/*

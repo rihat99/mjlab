@@ -14,8 +14,8 @@ exists but the files have changed since:
 
     PY=<worktree>/.venv/bin/python
     $PY tools/train_library.py --iters 14000 --tag first [--clips walk1_subject1,...]
-    $PY tools/train_library.py --iters 40 --motions-dir $MJLAB_DATA/motions_seed \\
-        --log-root $MJLAB_DATA/runs/seed_supermimic
+    $PY tools/train_library.py --iters 40 --motions-dir data/motions/seed \\
+        --log-root runs/seed
 
 Evaluate: the paper's library protocol (each clip once from frame 0, in waves of at
 most --num-envs clips) on the run's training library ->
@@ -219,8 +219,19 @@ def main() -> None:
     "--clips", help="train: comma-separated clip ids of <motions-dir> (default: all)"
   )
   parser.add_argument("--clip", help="play: clip id of the run's library")
-  parser.add_argument("--motions-dir", type=Path, default=MOTIONS_DIR)
-  parser.add_argument("--log-root", type=Path, default=LOG_ROOT)
+  parser.add_argument(
+    "--motions-dir",
+    type=Path,
+    default=MOTIONS_DIR,
+    help="npz folder of the library (default: %(default)s; BONES-SEED: "
+    "data/motions/seed)",
+  )
+  parser.add_argument(
+    "--log-root",
+    type=Path,
+    default=LOG_ROOT,
+    help="folder of the runs (default: %(default)s; BONES-SEED: runs/seed)",
+  )
   parser.add_argument(
     "--run-dir", type=Path, help="play/eval: run dir (default: newest run)"
   )
