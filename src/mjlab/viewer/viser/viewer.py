@@ -42,9 +42,6 @@ class CheckpointManager:
   current_name: str
   fetch_available: Callable[[], list[tuple[str, str]]]
   load_checkpoint: Callable[[str], PolicyProtocol]
-  run_name: str | None = None
-  run_url: str | None = None
-  run_status: str | None = None
 
 
 def format_time_ago(seconds: int) -> str:
@@ -220,30 +217,13 @@ class ViserPlayViewer(BaseViewer):
 
     # Checkpoints tab (optional, when checkpoint_manager is provided).
     if self._ckpt_mgr is not None:
-      is_wandb = self._ckpt_mgr.run_url is not None
       with tabs.add_tab("Checkpoints", icon=viser.Icon.DATABASE):
-        if is_wandb:
-          url = self._ckpt_mgr.run_url
-          self._server.gui.add_html(
-            '<div style="font-size:0.85em;line-height:1.25;'
-            'padding:0 1em 0.5em 1em;">'
-            "<strong>Source:</strong> W&B<br/>"
-            f"<strong>Run:</strong>"
-            f" {self._ckpt_mgr.run_name}<br/>"
-            f"<strong>Status:</strong>"
-            f" {self._ckpt_mgr.run_status}<br/>"
-            f'<a href="{url}" target="_blank"'
-            f' style="color:#3b82f6;">'
-            f"Open in W&B</a>"
-            "</div>"
-          )
-        else:
-          self._server.gui.add_html(
-            '<div style="font-size:0.85em;line-height:1.25;'
-            'padding:0 1em 0.5em 1em;">'
-            "<strong>Source:</strong> Local"
-            "</div>"
-          )
+        self._server.gui.add_html(
+          '<div style="font-size:0.85em;line-height:1.25;'
+          'padding:0 1em 0.5em 1em;">'
+          "<strong>Source:</strong> Local"
+          "</div>"
+        )
 
         self._ckpt_dropdown = self._server.gui.add_dropdown(
           "Checkpoint",

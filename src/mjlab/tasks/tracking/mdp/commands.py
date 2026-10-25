@@ -73,7 +73,6 @@ class MotionLoader:
     motion_file: str | Sequence[str],
     body_indexes: torch.Tensor,
     device: str = "cpu",
-    float32: bool = False,
   ) -> None:
     files = expand_motion_files(motion_file)
     if not files:
@@ -89,7 +88,7 @@ class MotionLoader:
         lengths.append(clip["joint_pos"].shape[0])
         for key, dtype in _STORAGE_DTYPES.items():
           data = clip[key][:, bodies] if key.startswith("body_") else clip[key]
-          parts[key].append(data.astype(np.float32 if float32 else dtype, copy=False))
+          parts[key].append(data.astype(dtype, copy=False))
     if min(lengths) < 2:
       raise ValueError("Every motion clip needs at least 2 frames.")
 
@@ -132,10 +131,7 @@ class MotionCommand(CommandTerm):
     )
 
     self.motion = MotionLoader(
-      self.cfg.motion_file,
-      self.body_indexes,
-      device=self.device,
-      float32=self.cfg.float32_library,
+      self.cfg.motion_file, self.body_indexes, device=self.device
     )
     self.time_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
     # sampling_mode "start": env i plays clip start_clip[i] (evaluation sets it).
@@ -810,8 +806,6 @@ class MotionCommandCfg(CommandTermCfg):
   """Return sampling: EMA factor of the per-bin return estimates."""
   past_weight_alpha: float = 1e-4
   """Return sampling: EMA factor of the past softmax weights, per iteration."""
-  float32_library: bool = False
-  """Store the whole motion library in float32 instead of the compact float16 layout."""
 
   @dataclass
   class VizCfg:

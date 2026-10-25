@@ -137,13 +137,9 @@ class ModelInterface(Protocol):
     """Per-term rewards, each (B,), for logging and parity checks."""
     ...
 
-  def termination_hard(self, s_next: torch.Tensor, frame: torch.Tensor) -> torch.Tensor:
-    """Analytic termination rule (B,) bool; diagnostics only (labels come from env)."""
-    ...
-
   def termination_soft(self, s_next: torch.Tensor, frame: torch.Tensor) -> torch.Tensor:
-    """(grad) Termination probability (B,) of s_next against frame: the hard rule's
-    errors through sigmoids."""
+    """(grad) Termination probability (B,) of s_next against frame: the env's
+    termination errors through sigmoids. Imagination uses it as d_{t+1}."""
     ...
 
   def clip_end(self, frame: torch.Tensor) -> torch.Tensor:

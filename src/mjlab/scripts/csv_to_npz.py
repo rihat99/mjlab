@@ -229,6 +229,8 @@ def run_sim(
   output_file,
   render,
   line_range,
+  atol: float,
+  rtol: float,
   renderer: OffscreenRenderer | None = None,
 ):
   motion = MotionLoader(
@@ -316,10 +318,16 @@ def run_sim(
       )
 
       torch.testing.assert_close(
-        robot.data.body_link_lin_vel_w[0, 0], motion_base_lin_vel[0]
+        robot.data.body_link_lin_vel_w[0, 0],
+        motion_base_lin_vel[0],
+        atol=atol,
+        rtol=rtol,
       )
       torch.testing.assert_close(
-        robot.data.body_link_ang_vel_w[0, 0], motion_base_ang_vel[0]
+        robot.data.body_link_ang_vel_w[0, 0],
+        motion_base_ang_vel[0],
+        atol=atol,
+        rtol=rtol,
       )
 
       frame_count += 1
@@ -370,6 +378,8 @@ def main(
   device: str = "cuda:0",
   render: bool = False,
   line_range: tuple[int, int] | None = None,
+  atol: float = 1e-5,
+  rtol: float = 1.3e-6,
 ):
   """Replay motion from CSV file and output to npz file.
 
@@ -381,6 +391,8 @@ def main(
     device: Device to use.
     render: Whether to render the simulation and save a video.
     line_range: Range of lines to process from the CSV file.
+    atol: Absolute tolerance of the per-frame root velocity read-back check.
+    rtol: Relative tolerance of that check (both defaults: torch's float32 ones).
   """
   if device.startswith("cuda") and not torch.cuda.is_available():
     print("[WARNING]: CUDA is not available. Falling back to CPU. This may be slow.")
@@ -424,6 +436,8 @@ def main(
     output_file=output_file,
     render=render,
     line_range=line_range,
+    atol=atol,
+    rtol=rtol,
     renderer=renderer,
   )
 

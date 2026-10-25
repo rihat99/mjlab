@@ -1,7 +1,6 @@
 """SuperMimic runner configuration. Defaults are the paper's Table A.5 unless noted."""
 
 from dataclasses import dataclass, field
-from typing import Literal
 
 from mjlab.rl.config import RslRlBaseRunnerCfg
 
@@ -24,20 +23,13 @@ class WorldModelCfg:
   """(choice) Lower bound of the nominal increment scale per block: position (m),
   rotation (rad), linear velocity (m/s), angular velocity (rad/s), q (rad),
   qd (rad/s)."""
-  termination_head_hidden: tuple[int, ...] = (256, 128)
-  """(choice) Termination head MLP hidden layers (ELU)."""
-  termination_pos_weight: float = 1.0
-  """(choice) Positive-class weight of the termination BCE (1.0 = unweighted)."""
-  running_statistics: bool = True
-  """Keep updating the input normaliser, the termination-head input normaliser and the
-  nominal increment scales from the logged (real) transitions of the windows sampled
-  by every world-model fit, before its Adam steps (never from imagined states). False:
-  fitted once at the end of the prefill and frozen (the policy's actions then drift
-  far outside the prefill's action statistics)."""
   statistics_horizon: int = 100
-  """(choice) With ``running_statistics``: rsl_rl's running mean / variance until the
-  statistics hold this many fits' worth of samples, then an exponential moving average
-  that weighs each fit's samples by 1 / (statistics_horizon + 1)."""
+  """(choice) The input normaliser and the nominal increment scales are fitted at the
+  end of the prefill, then updated before every world-model fit from the logged (real)
+  transitions of its sampled windows, never from imagined states (frozen statistics
+  fall behind the policy's actions): rsl_rl's running mean / variance until they hold
+  this many fits' worth of samples, then an exponential moving average that weighs
+  each fit's samples by 1 / (statistics_horizon + 1)."""
 
 
 @dataclass
@@ -64,24 +56,15 @@ class PolicyCfg:
   """Imagined rollouts per policy update."""
   horizon: int = 32
   """Imagination horizon H."""
-  seed_end_margin: int = 0
+  seed_end_margin: int = 10
   """(choice) Seeds need ``frame + horizon + seed_end_margin < clip_end``: the
-  bootstrap state s_H stays this many frames away from the clip's last frame."""
+  bootstrap state s_H stays this many frames away from the clip's last frame. The
+  critic is fit on s_0..s_{H-1} only; without a margin, V(s_H) at the ends of clips
+  cut mid-motion drove the critic loss to blow up."""
   gamma: float = 0.99
   """Discount factor (imagination, critic targets and reset-sampler returns)."""
-  obs_normalization: bool = True
-  """Normalise observation frames and goal with running statistics of sim data."""
   normalizer_freeze_iteration: int = 20000
   """(choice) Iteration after which the observation/goal statistics stop updating."""
-  imagine_action_noise: bool = True
-  """Imagination executes a + action_noise_std * N(0, 1) (the collection noise,
-  detached) like the simulator: the world model, the next observation's previous action
-  and the action-rate reward see the noisy action. False: the clean action."""
-  analytic_termination: bool = True
-  """Imagination uses the task's analytic soft termination (iface.termination_soft)
-  instead of the learned head, in the objective and the critic targets (as
-  supermimic_vibed mdp.py:155-162); the head keeps training, for logging. The
-  learned head failed more clips than the analytic rule at 14k (README results)."""
 
 
 @dataclass
@@ -103,7 +86,8 @@ class CriticCfg:
 @dataclass
 class CollectionCfg:
   action_noise_std: float = 0.1
-  """Std of the Gaussian noise added to the policy action in the simulator."""
+  """Std of the Gaussian noise added to the policy action in the simulator and, the
+  same way, in imagination."""
   replay_steps: int = 1000
   """Replay buffer capacity in steps per env."""
   sim_steps_per_iteration: float = 2.5
@@ -127,23 +111,12 @@ class ScheduleCfg:
 class PrecisionCfg:
   tf32: bool = True
   """Allow TF32 matmuls and convolutions (those that ``autocast`` leaves in fp32)."""
-  compile: bool = True
-  """``torch.compile`` the world-model loss, the imagined step, the state heads and the
-  critic loss (CUDA graphs except the state heads) and use fused Adam: the same math
-  with far fewer kernel launches. The policy objective stays eager (compiled as a
-  whole, its backward was wrong); its reward and termination are compiled each on
-  its own. False runs everything eagerly."""
-  autocast: Literal["bf16", "fp16", "none"] = "bf16"
-  """(choice) "bf16": the world-model loss, the imagined steps and the policy
-  objective run under bfloat16 autocast (matmuls in bf16 with fp32 accumulation,
-  about twice the TF32 rate; every Linear output and activation is rounded to bf16's
-  8-bit mantissa). bf16 has fp32's exponent range, so no loss scaling: the gradient
-  scalers are disabled, as with "none". "fp16": the same under float16 autocast
-  (11-bit mantissa, narrow range), and each of the two backward passes runs on a
-  loss scaled by its own dynamic ``torch.amp.GradScaler``; the gradients are unscaled
-  before the clips, a step whose scaled gradients overflow is skipped and counted.
-  Collection and the critic fit stay fp32. "none": fp32 throughout (TF32 matmuls
-  with ``tf32``)."""
+  autocast: bool = True
+  """(choice) The world-model loss, the imagined steps and the policy objective run
+  under bfloat16 autocast (matmuls in bf16 with fp32 accumulation, about twice the
+  TF32 rate; every Linear output and activation is rounded to bf16's 8-bit mantissa).
+  bf16 has fp32's exponent range, so no loss scaling. Collection and the critic fit
+  stay fp32. False: fp32 throughout (TF32 matmuls with ``tf32``)."""
 
 
 @dataclass

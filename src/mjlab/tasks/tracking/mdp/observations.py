@@ -87,25 +87,3 @@ def motion_future_frames_reference(
   """
   command = cast(MotionCommand, env.command_manager.get_term(command_name))
   return command.reference_goal(command.time_steps, future_frames)
-
-
-def motion_future_frames_b(
-  env: ManagerBasedRlEnv, command_name: str, future_frames: int = 10
-) -> torch.Tensor:
-  """Reference frames k_t .. k_t + K - 1 (clamped to the clip end) seen from the robot.
-
-  See ``kernels.future_frames_goal``. Positions are taken env-local (reference as
-  stored, robot minus its env origin), so the goal does not lose float32 precision
-  to large env origins. Returns (N, K * (9 + 2 J)).
-  """
-  command = cast(MotionCommand, env.command_manager.get_term(command_name))
-  frames = command.future_frames(command.time_steps, future_frames)
-  anchor = command.motion_anchor_body_index
-  return kernels.future_frames_goal(
-    command.motion.body_pos_w[frames, anchor],
-    command.motion.body_quat_w[frames, anchor].float(),
-    command.motion.joint_pos[frames].float(),
-    command.motion.joint_vel[frames].float(),
-    command.robot_anchor_pos_w - env.scene.env_origins,
-    command.robot_anchor_quat_w,
-  )

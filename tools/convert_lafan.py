@@ -8,12 +8,11 @@ becomes ``<output-dir>/<clip>.npz`` through mjlab's ``csv_to_npz`` (lerp / slerp
 50 Hz, finite-difference velocities, body states from the G1 kinematics), one clip
 after the other in this process; a clip whose npz exists is skipped.
 
-The only change to ``csv_to_npz``: its per-frame self-check, which compares the
-simulator's read-back root linear / angular velocity with the value just written
-(``torch.testing.assert_close``, float32 default atol 1e-5, rtol 1.3e-6), runs with
-atol = rtol = 1e-4. On fallAndGetUp2_subject2 one frame differs by 1.22e-5 (float32
-noise) and the plain converter aborts. The check only compares; the saved arrays are
-the same.
+``csv_to_npz``'s per-frame self-check, which compares the simulator's read-back root
+linear / angular velocity with the value just written (by default with torch's float32
+tolerances, atol 1e-5, rtol 1.3e-6), runs here with atol = rtol = 1e-4: on
+fallAndGetUp2_subject2 one frame differs by 1.22e-5 (float32 noise) and the default
+check aborts. The check only compares; the saved arrays are the same.
 
     PY=<worktree>/.venv/bin/python
     $PY tools/convert_lafan.py <LAFAN1_Retargeting_Dataset>/g1 \\
@@ -23,7 +22,6 @@ the same.
 from __future__ import annotations
 
 import argparse
-import functools
 import os
 from pathlib import Path
 
@@ -50,16 +48,8 @@ def main() -> None:
     parser.error(f"no CSVs in {args.input_dir} or missing: {missing}")
   # Set before mjlab imports torch.
   os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
-  import torch
-
   from mjlab.scripts import csv_to_npz
 
-  # csv_to_npz looks the function up on torch.testing at every call.
-  torch.testing.assert_close = functools.partial(
-    torch.testing.assert_close,
-    atol=SELF_CHECK_TOLERANCE,
-    rtol=SELF_CHECK_TOLERANCE,
-  )
   for number, csv in enumerate(csvs, 1):
     output = args.output_dir / f"{csv.stem}.npz"
     if output.exists():
@@ -67,7 +57,12 @@ def main() -> None:
       continue
     print(f"[convert_lafan] {number}/{len(csvs)} {csv.stem}", flush=True)
     csv_to_npz.main(
-      input_file=str(csv), output_file=str(output), input_fps=30.0, output_fps=50.0
+      input_file=str(csv),
+      output_file=str(output),
+      input_fps=30.0,
+      output_fps=50.0,
+      atol=SELF_CHECK_TOLERANCE,
+      rtol=SELF_CHECK_TOLERANCE,
     )
 
 

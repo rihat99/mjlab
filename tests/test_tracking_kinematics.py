@@ -1,9 +1,5 @@
 """Tests for the differentiable forward kinematics of the tracking task."""
 
-import os
-from pathlib import Path
-
-import numpy as np
 import pytest
 import torch
 from conftest import get_test_device, write_g1_motion_npz
@@ -83,29 +79,6 @@ def test_fk_matches_live_env(env: ManagerBasedRlEnv) -> None:
     torch.testing.assert_close(
       ang_vel, command.robot_body_ang_vel_w, atol=VEL_TOL, rtol=0
     )
-
-
-@pytest.mark.skipif(
-  not Path(os.environ.get("TRACKING_PARITY_BEFORE", "/nonexistent")).is_file(),
-  reason="set TRACKING_PARITY_BEFORE to a rollout recorded by record_baseline.py",
-)
-def test_fk_matches_recorded_rollout() -> None:
-  """FK built from the standalone robot model reproduces a recorded rollout."""
-  record = np.load(os.environ["TRACKING_PARITY_BEFORE"])
-  num_bodies = len(record["tracked_body_names"])
-  model = Entity(get_g1_robot_cfg()).compile()
-  fk = TorchKinematics(model, list(record["tracked_body_names"]))
-
-  def flat(key: str, width: int) -> torch.Tensor:
-    return torch.from_numpy(record[key]).reshape(-1, num_bodies, width)
-
-  qpos = torch.from_numpy(record["qpos"]).reshape(-1, record["qpos"].shape[-1])
-  qvel = torch.from_numpy(record["qvel"]).reshape(-1, record["qvel"].shape[-1])
-  pos, quat, lin_vel, ang_vel = _fk_from_state(fk, qpos, qvel)
-  torch.testing.assert_close(pos, flat("body_pos_w", 3), atol=POS_TOL, rtol=0)
-  _assert_quat_close(quat, flat("body_quat_w", 4))
-  torch.testing.assert_close(lin_vel, flat("body_lin_vel_w", 3), atol=VEL_TOL, rtol=0)
-  torch.testing.assert_close(ang_vel, flat("body_ang_vel_w", 3), atol=VEL_TOL, rtol=0)
 
 
 def test_fk_gradcheck() -> None:

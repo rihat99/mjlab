@@ -8,7 +8,7 @@ extras) and the synthetic interface implements the ModelInterface protocol on it
 """
 
 import math
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from types import SimpleNamespace
 from typing import cast
 
@@ -158,10 +158,6 @@ class _SyntheticInterface:
     terms = self.reward_terms(s_next, a, a_prev, frame)
     return terms["joint"] + terms["height"] + terms["action_rate"]
 
-  def termination_hard(self, s_next, frame):
-    height_error = s_next[:, 2] - self.env.ref_pos[frame, 2]
-    return height_error.abs() > HEIGHT_TOLERANCE
-
   def termination_soft(self, s_next, frame):
     height_error = s_next[:, 2] - self.env.ref_pos[frame, 2]
     return torch.sigmoid((height_error.abs() - HEIGHT_TOLERANCE) / 0.01)
@@ -308,7 +304,7 @@ class _SyntheticEnv:
     reward = self.iface.reward(s1, actions, self.a_prev, frame)
     self.episode_length_buf += 1
     self.common_step_counter += 1
-    terminated = self.iface.termination_hard(s1, frame)
+    terminated = (s1[:, 2] - self.ref_pos[frame, 2]).abs() > HEIGHT_TOLERANCE
     motion_end = frame >= self.clip_end_of_frame[frame] - 1
     truncated = (self.episode_length_buf >= self.max_episode_length) | motion_end
     done = terminated | truncated
@@ -348,15 +344,13 @@ def _fill_buffer(
   for _ in range(steps):
     state, frame = env.state.clone(), env.frame.clone()
     action = action_std * torch.randn(env.num_envs, NQ, device=env.device)
-    _, reward, dones, _ = env.step(action)
+    _, _, dones, _ = env.step(action)
     done = dones.bool()
     assert env.terminal_state is not None
     buffer.add(
       state=state,
       action=action,
       frame=frame,
-      reward=reward,
-      terminated=env.termination_manager.terminated,
       done=done,
       terminal_state=env.terminal_state,
       episode_step=episode_step,
@@ -406,8 +400,6 @@ def test_replay_buffer_windows_and_seeds_around_dones_and_wrap():
       state=torch.tensor([[t, 0.0], [t, 1.0]]),
       action=torch.full((2, 1), float(t)),
       frame=torch.full((2,), t),
-      reward=torch.zeros(2),
-      terminated=done,
       done=done,
       terminal_state=torch.tensor([[100.0 + t, 0.0], [100.0 + t, 1.0]]),
       episode_step=episode_step,
@@ -425,8 +417,6 @@ def test_replay_buffer_windows_and_seeds_around_dones_and_wrap():
     starts.add((env, t))
     for m in range(2):
       assert windows["targets"][i, m].tolist() == next_state(t + m, env)
-      assert windows["frames"][i, m] == t + m
-    assert bool(windows["terminated"][i, 1]) == (env == 0 and t + 1 == 4)
   assert windows["valid"].all()
   # Starts need rows t, t+1, t+2 stored and no done at row t.
   assert starts == {(0, 3), (0, 5), (0, 6), (1, 3), (1, 4), (1, 5), (1, 6)}
@@ -463,7 +453,7 @@ def test_world_model_k_step_loss_decreases(device):
 
   def state_loss() -> float:
     with torch.no_grad():
-      loss, _, _ = world_model_loss(alg.world_model, env.iface, windows, context, 1.0)
+      loss, _ = world_model_loss(alg.world_model, env.iface, windows, context)
     return float(loss)
 
   initial = state_loss()
@@ -480,42 +470,29 @@ def test_running_world_model_statistics(device):
   prefill = _fill_buffer(env, 40)
   wider = _fill_buffer(env, 40, action_std=3.0)
   actions = slice(env.iface.feature_dim, env.iface.feature_dim + NQ)
-  model = None
-  for running in (False, True):
-    cfg = replace(wm_cfg, running_statistics=running)
-    alg = SuperMimic(env.iface, cfg, policy_cfg, critic_cfg, device)
-    alg.fit_world_model_statistics(prefill)
-    model = alg.world_model
-    before = {name: b.clone() for name, b in model.named_buffers()}
-    storage = {name: b.data_ptr() for name, b in model.named_buffers()}
-    alg.fit_world_model(wider)
-    after = dict(model.named_buffers())
-    # Buffers keep their storage: CUDA graphs read them by address.
-    assert storage == {name: b.data_ptr() for name, b in after.items()}
-    changed = {name for name in before if not torch.equal(before[name], after[name])}
-    if not running:
-      assert not changed
-      continue
-    for name in ("input_normalizer", "termination_head.normalizer"):
-      assert {f"{name}._mean", f"{name}._var", f"{name}._std"} <= changed
-    assert "nominal_scale" in changed
-    std_before = before["input_normalizer._std"][0, actions]
-    assert (after["input_normalizer._std"][0, actions] > 2.0 * std_before).all()
-    assert (model.nominal_scale >= model.nominal_floor).all()
+  alg = SuperMimic(env.iface, wm_cfg, policy_cfg, critic_cfg, device)
+  alg.fit_world_model_statistics(prefill)
+  model = alg.world_model
+  before = {name: b.clone() for name, b in model.named_buffers()}
+  storage = {name: b.data_ptr() for name, b in model.named_buffers()}
+  alg.fit_world_model(wider)
+  after = dict(model.named_buffers())
+  # Buffers keep their storage: CUDA graphs read them by address.
+  assert storage == {name: b.data_ptr() for name, b in after.items()}
+  changed = {name for name in before if not torch.equal(before[name], after[name])}
+  assert {f"input_normalizer.{s}" for s in ("_mean", "_var", "_std")} <= changed
+  assert "nominal_scale" in changed
+  std_before = before["input_normalizer._std"][0, actions]
+  assert (after["input_normalizer._std"][0, actions] > 2.0 * std_before).all()
+  assert (model.nominal_scale >= model.nominal_floor).all()
 
   # Moving average: the count is capped at max_count before each update (weight 1/2
   # here), so increments of zero shrink the scale geometrically down to the floor.
-  assert model is not None  # the running-statistics model of the last iteration
   num = 256
   inputs = torch.randn(num, model.input_normalizer.get_buffer("_mean").shape[-1])
-  heads = torch.randn(
-    num, model.termination_head.normalizer.get_buffer("_mean").shape[-1]
-  )
   zeros = torch.zeros(num, model.state.delta_dim)
   for _ in range(60):
-    model.update_statistics(
-      inputs.to(device), zeros.to(device), heads.to(device), max_count=num
-    )
+    model.update_statistics(inputs.to(device), zeros.to(device), max_count=num)
   assert int(model.increment_statistics.get_buffer("count")) == 2 * num
   torch.testing.assert_close(model.nominal_scale, model.nominal_floor, rtol=0, atol=0)
 
@@ -547,7 +524,7 @@ def test_policy_bptt_update(device):
     for module in (alg.world_model, alg.critic)
   }
 
-  metrics, rollout, finite = alg.update_policy(buffer)
+  metrics, rollout = alg.update_policy(buffer)
 
   grads = [p.grad for p in alg.policy.parameters() if p.grad is not None]
   assert grads and all(torch.isfinite(g).all() for g in grads)
@@ -556,8 +533,8 @@ def test_policy_bptt_update(device):
   total_norm = torch.cat([g.flatten() for g in grads]).norm()
   assert float(total_norm) <= policy_cfg.max_grad_norm + 1e-5
   assert torch.isfinite(metrics["policy_grad_norm"]) and metrics["policy_grad_norm"] > 0
-  assert finite
-  assert alg.skipped_policy_steps == 0
+  tensors = (rollout.features, rollout.goals, rollout.rewards, rollout.terminations)
+  assert all(torch.isfinite(x).all() for x in (*metrics.values(), *tensors))
   assert any(
     not torch.equal(b, p) for b, p in zip(before, alg.policy.parameters(), strict=True)
   )
@@ -576,20 +553,11 @@ def test_policy_bptt_update(device):
   assert "critic" in alg.fit_critic(rollout)
 
 
-@pytest.mark.parametrize(
-  "flags", [False, True], ids=["frozen_clean", "running_noisy_analytic"]
-)
-def test_compiled_iteration_matches_eager(device, flags):
+def test_compiled_iteration_matches_eager(device):
   if device == "cpu":
     pytest.skip("the compiled path (torch.compile + CUDA graphs) targets CUDA")
   env = _SyntheticEnv(64, device)
   wm_cfg, policy_cfg, critic_cfg = _small_cfgs()
-  # flags: running world-model statistics, the action noise and the analytic
-  # termination in imagination.
-  wm_cfg = replace(wm_cfg, running_statistics=flags)
-  policy_cfg = replace(
-    policy_cfg, imagine_action_noise=flags, analytic_termination=flags
-  )
   buffer = _fill_buffer(env, 40)
   losses = {}
   for compile in (False, True):
@@ -602,21 +570,19 @@ def test_compiled_iteration_matches_eager(device, flags):
     # place by the first.
     for _ in range(2):
       metrics = alg.fit_world_model(buffer)
-      policy_metrics, rollout, _ = alg.update_policy(buffer)
+      policy_metrics, rollout = alg.update_policy(buffer)
       losses[compile] = metrics | policy_metrics | alg.fit_critic(rollout)
   for key, eager in losses[False].items():
     torch.testing.assert_close(losses[True][key], eager, rtol=1e-4, atol=1e-8)
 
 
-@pytest.mark.parametrize("analytic", [False, True], ids=["learned_head", "analytic"])
-def test_compiled_policy_gradient_matches_eager(device, analytic):
+def test_compiled_policy_gradient_matches_eager(device):
   # The losses can agree while the gradients do not (a compiled objective once gave
   # the right loss with a gradient at cosine ~0.5 to the eager one).
   if device == "cpu":
     pytest.skip("the compiled path (torch.compile + CUDA graphs) targets CUDA")
   env = _SyntheticEnv(64, device)
   wm_cfg, policy_cfg, critic_cfg = _small_cfgs()
-  policy_cfg = replace(policy_cfg, analytic_termination=analytic)
   buffer = _fill_buffer(env, 40)
   grads = []
   for compile in (False, True):
@@ -678,7 +644,6 @@ def test_runner_learn_save_load_and_inference(device, tmp_path):
   assert env.common_step_counter == 16 + 75
   assert runner.current_learning_iteration == 30
   assert env.past_weight_updates == 30 and env.bin_update_calls > 0
-  assert runner.alg.skipped_policy_steps == 0
   for it in (10, 20, 30):
     assert (tmp_path / f"model_{it}.pt").is_file()
   header = (tmp_path / "metrics.csv").read_text().splitlines()[0].split(",")

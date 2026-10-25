@@ -11,25 +11,28 @@ Added
 - Added SuperMimic, model-based motion tracking over a clip library: the
   ``mjlab.rl.supermimic`` learner (world model fitted on 8-step windows of a
   replay buffer, deterministic policy trained by backpropagation through 32-step
-  imagined rollouts, critic, return-based reset sampling) and the
-  ``Mjlab-Tracking-Flat-Unitree-G1-SuperMimic`` task. The task side adds a
-  multi-clip ``MotionCommand`` (``motion_file`` takes a tuple of npz), the
-  ``motion_end`` time-out, a 10-frame future-reference goal observation, pure
-  tracking kernels with a differentiable forward kinematics, the
+  imagined rollouts under bfloat16 autocast, critic, return-based reset sampling)
+  and the ``Mjlab-Tracking-Flat-Unitree-G1-SuperMimic`` task. The task side adds a
+  multi-clip ``MotionCommand`` (``motion_file`` takes a tuple of npz or a ``.txt``
+  file listing them; only the tracked bodies are kept, in float16 except the body
+  positions, so that a 47 M-frame library fits on one GPU), the ``motion_end``
+  time-out, Uni-SuperMimic's 10-frame reference goal and orientation-error
+  observation, pure tracking kernels with a differentiable forward kinematics, the
   ``TrackingModelInterface`` that evaluates observation, goal, reward and
-  termination on imagined states, a terminal-state recorder, and an
-  ``evaluate_library`` script. ``train`` and ``play`` accept a motion library.
-  The learner's hot paths run through ``torch.compile`` and CUDA graphs
-  (``precision.compile``, on by default; about 4x faster per iteration).
-  Imagination uses the task's analytic termination by default
-  (``policy.analytic_termination``); the learned termination head is kept for
-  comparison.
-- The SuperMimic task uses the contact physics of Uni-SuperMimic: no robot
-  self-collision, and the startup friction randomisation on every robot collision
-  geom with the ground at 0.3 in training (``self_collision`` and
-  ``friction_all_geoms`` of ``unitree_g1_flat_tracking_supermimic_env_cfg``).
-  ``Mjlab-Tracking-Flat-Unitree-G1-SuperMimic-SelfCollision`` keeps self-collision
-  and the foot-only friction randomisation.
+  termination on imagined states, a terminal-state recorder, and the
+  ``evaluate_library`` script (each clip once from frame 0, in waves of at most
+  ``--num-envs`` clips). ``train`` and ``play`` accept a motion library. The
+  learner's hot paths run through ``torch.compile`` and CUDA graphs; imagination
+  ends with the task's analytic termination, and ``PolicyCfg.seed_end_margin``
+  (default 10) keeps the last imagined state away from the clip end, where the
+  critic is never fit. The task uses the contact physics of Uni-SuperMimic: no
+  robot self-collision, and the startup friction randomisation on every robot
+  collision geom with the ground at 0.3 in training.
+- Added local logging without WandB (``mjlab.rl.local_log_writer``: TensorBoard
+  events, ``metrics.csv`` and ``curves.png`` in the run dir; ``--logger local`` is
+  the default) and removed the WandB options, uploads and dependency.
+- ``csv_to_npz`` writes a local npz and takes ``--atol`` / ``--rtol`` for its
+  velocity self-check.
 - Added a ``cu126`` extra (``uv sync --extra cu126``) that installs torch built for
   CUDA 12.6, for machines whose NVIDIA driver is older than 580. It does not include
   kernels for Blackwell GPUs.
@@ -39,40 +42,6 @@ Added
 Changed
 ^^^^^^^
 
-- SuperMimic iterations take 0.24 s instead of 0.40 s (4096 envs, 40 clips, RTX PRO
-  6000). Same maths, 0.40 to 0.32 s: the policy objective's reward and termination are
-  compiled (the objective itself stays eager), the motion library is marked static
-  for the CUDA graphs (each replay copied the whole library, a cost that grew with its
-  size), and host syncs are gone from the world-model steps and four places of the
-  env step. Then 0.32 to 0.24 s: the world-model fit and the policy update run under
-  fp16 autocast with a gradient scaler each (``precision.autocast``, default
-  ``"fp16"``; ``"none"`` keeps fp32 with TF32). fp16 rounds every Linear output and
-  activation, not only the matmul inputs as TF32 does; its effect on quality over a
-  full run is not yet measured. The gradient scales are kept at 2^10 or more and the
-  runner warns when a scale falls below 2^12 or more than 0.5 % of a log window's
-  steps are skipped. ``tools/check_policy_grad.py`` compares the compiled learner's
-  gradients with the eager learner's on a checkpoint (noisy under TF32, policy cosine
-  means 0.98–0.9999; ``--no-tf32``: 0.999999), ``tools/check_reward_grad.py`` the
-  compiled reward and termination with the eager ones (within 2e-6).
-- The SuperMimic policy input follows Uni-SuperMimic's deployable layout: the goal
-  holds the 10 reference frames only (root position delta, 6D rotation, local root
-  velocities, joint positions, 0.1 x joint velocities, in the heading frame of the
-  current reference frame; 730), no robot position enters it, and the actor frame
-  gains the 6D orientation error of the robot root to the current reference frame
-  (99 per frame). The previous layout (reference anchor poses seen from the robot
-  anchor, 670; actor 93 per frame) stays available for the existing checkpoints as
-  ``Mjlab-Tracking-Flat-Unitree-G1-SuperMimic-AnchorGoal`` and
-  ``...-SelfCollision-AnchorGoal`` (``goal="anchor"`` of the env cfg).
-  ``precision.autocast`` defaults to ``"bf16"``: no gradient scalers and no scale
-  metrics, as with ``"none"``; ``"fp16"`` keeps the scalers.
-- ``PolicyCfg.seed_end_margin`` (default 0) keeps the last state of every imagined
-  rollout that many frames away from the clip end; ``MotionCommandCfg.float32_library``
-  (default False) stores the whole library in float32 for A/B tests.
-- The tracking ``MotionLoader`` keeps only the tracked bodies and stores joints,
-  body quaternions and body velocities in float16 (body positions in float32), so
-  that a 47 M-frame library fits on one GPU (25 GiB); ``motion_file`` also takes a
-  ``.txt`` file listing npz paths, and ``evaluate_library`` plays a library larger
-  than ``--num-envs`` in waves.
 - Bumped ``rsl-rl-lib`` from 5.5.0 to 5.5.1. This removes the need for capping
   ``wandb`` below 0.29.
 

@@ -1,5 +1,6 @@
 """Motion library: multi-clip loading, per-clip bins, return-based reset sampling, the
-motion_end time-out, the future-frame goal, the SuperMimic env and library evaluation."""
+motion_end time-out, future-frame clamping, the SuperMimic env and library
+evaluation."""
 
 from pathlib import Path
 from typing import cast
@@ -11,7 +12,6 @@ from conftest import get_test_device, write_g1_motion_npz
 
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.tasks.registry import load_env_cfg
-from mjlab.tasks.tracking import mdp
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
 from mjlab.tasks.tracking.mdp.commands import MotionCommand, MotionLoader
 from mjlab.tasks.tracking.scripts.evaluate_library import (
@@ -214,59 +214,6 @@ def test_motion_end_never_wraps(env: ManagerBasedRlEnv) -> None:
     env.reset()
 
 
-def _matrix(quat: np.ndarray) -> np.ndarray:
-  w, x, y, z = quat / np.linalg.norm(quat)
-  return np.array(
-    [
-      [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
-      [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
-      [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
-    ]
-  )
-
-
-def test_goal_matches_hand_computation(env: ManagerBasedRlEnv) -> None:
-  command = _command(env)
-  obs, _ = env.reset()
-  actions = torch.zeros(NUM_ENVS, env.action_manager.total_action_dim)
-  for _ in range(5):
-    obs, *_ = env.step(actions.to(env.device))
-  # The default task's goal is the reference layout; the anchor layout's term is
-  # checked below by hand.
-  goal = mdp.motion_future_frames_reference(env, "motion", future_frames=10)
-  assert goal.shape == (NUM_ENVS, 730)
-  torch.testing.assert_close(obs["goal"], goal, atol=0, rtol=0)
-  goal = mdp.motion_future_frames_b(env, "motion", future_frames=10)
-  assert goal.shape == (NUM_ENVS, 670)
-
-  # Near its clip end, so the last future frames are clamped.
-  env_id = 1
-  frame = int(command.clip_end_of(command.time_steps[env_id : env_id + 1])[0]) - 4
-  command.time_steps[env_id] = frame
-  goal = mdp.motion_future_frames_b(env, "motion", future_frames=10)[env_id]
-
-  motion, anchor = command.motion, command.motion_anchor_body_index
-  last = int(command.clip_end_of(command.time_steps[env_id : env_id + 1])[0]) - 1
-  robot_pos = (command.robot_anchor_pos_w - env.scene.env_origins)[env_id]
-  robot_pos = robot_pos.double().cpu().numpy()
-  robot_rot = _matrix(command.robot_anchor_quat_w[env_id].double().cpu().numpy())
-  expected = []
-  for k in range(10):
-    f = min(frame + k, last)
-    ref_pos = motion.body_pos_w[f, anchor].double().cpu().numpy()
-    ref_rot = _matrix(motion.body_quat_w[f, anchor].double().cpu().numpy())
-    expected += [
-      robot_rot.T @ (ref_pos - robot_pos),
-      (robot_rot.T @ ref_rot)[:, :2].reshape(-1),
-      motion.joint_pos[f].double().cpu().numpy(),
-      motion.joint_vel[f].double().cpu().numpy(),
-    ]
-  np.testing.assert_allclose(
-    goal.double().cpu().numpy(), np.concatenate(expected), atol=1e-5, rtol=0
-  )
-  env.reset()
-
-
 def test_supermimic_env_builds_and_steps(motion_files: tuple[str, ...]) -> None:
   cfg = load_env_cfg(TASK_ID)
   assert "push_robot" not in cfg.events
@@ -297,46 +244,37 @@ def test_supermimic_env_builds_and_steps(motion_files: tuple[str, ...]) -> None:
 def test_evaluate_library_zero_policy(
   motion_files: tuple[str, ...], tmp_path: Path
 ) -> None:
-  """A walking clip (the robot holding still falls behind) and a standing clip."""
+  """Two walking clips (the robot holding still falls behind) and a standing clip."""
   standing = write_g1_motion_npz(tmp_path / "stand.npz", 60, amplitude=0.0, speed=0.0)
-  files = (motion_files[1], str(standing))
+  files = (*motion_files[:2], str(standing))
 
-  def evaluate(
-    motion_file: tuple[str, ...], num_envs: int | None = None, rollouts: int = 1
-  ) -> dict:
-    env = make_library_env(
-      TASK_ID,
-      motion_file,
-      get_test_device(),
-      rollouts_per_clip=rollouts,
-      num_envs=num_envs,
-    )
+  def evaluate(motion_file: tuple[str, ...], num_envs: int | None = None) -> dict:
+    env = make_library_env(TASK_ID, motion_file, get_test_device(), num_envs=num_envs)
     try:
 
       def zero_policy(obs) -> torch.Tensor:
         return torch.zeros(env.num_envs, env.num_actions, device=env.device)
 
-      return evaluate_library(env, zero_policy, rollouts)
+      return evaluate_library(env, zero_policy)
     finally:
       env.close()
 
   result = evaluate(files)
-  # 2 rollouts per clip on 3 envs (two waves), from a list file: the same results.
+  # 3 clips on 2 envs, from a list file: two waves (in the second, env 1 replays the
+  # standing clip unscored), the same results.
   listing = tmp_path / "library.txt"
   listing.write_text("".join(f"{file}\n" for file in files))
-  waves = evaluate((str(listing),), num_envs=3, rollouts=2)
-  assert (result["num_envs"], waves["num_envs"]) == (2, 3)
-  assert [c["rollout"] for c in waves["clips"]] == [0, 0, 1, 1]
-  assert waves["clip_failure_fraction"] == result["clip_failure_fraction"]
-  for item, wave_clip in enumerate(waves["clips"]):
-    clip = dict(result["clips"][item % 2])
+  waves = evaluate((str(listing),), num_envs=2)
+  assert (result["num_envs"], waves["num_envs"]) == (3, 2)
+  for clip, wave_clip in zip(result["clips"], waves["clips"], strict=True):
+    clip, wave_clip = dict(clip), dict(wave_clip)
     terms, wave_terms = clip.pop("reward_terms"), wave_clip.pop("reward_terms")
     assert sum(terms.values()) == pytest.approx(clip["return"], rel=1e-4)
-    assert clip | {"rollout": item // 2} == pytest.approx(wave_clip, rel=1e-4)
+    assert clip == pytest.approx(wave_clip, rel=1e-4)
     assert terms == pytest.approx(wave_terms, rel=1e-3, abs=1e-5)
   clips = result["clips"]
-  assert [c["clip"] for c in clips] == ["clip1", "stand"]
-  assert [c["frames"] for c in clips] == [CLIP_LENGTHS[1], 60]
+  assert [c["clip"] for c in clips] == ["clip0", "clip1", "stand"]
+  assert [c["frames"] for c in clips] == [*CLIP_LENGTHS[:2], 60]
   assert result["max_step_reward"] == pytest.approx(0.1)
   for clip in clips:
     assert clip["steps"] <= clip["frames"] - 1
@@ -344,7 +282,7 @@ def test_evaluate_library_zero_policy(
     assert clip["normalized_return"] == pytest.approx(
       clip["return"] / (0.1 * (clip["frames"] - 1))
     )
-  assert not clips[1]["failed"] and clips[1]["normalized_return"] > 0.5
+  assert not clips[2]["failed"] and clips[2]["normalized_return"] > 0.5
   assert result["num_failed"] == sum(c["failed"] for c in clips)
   assert result["mean_normalized_return"] == pytest.approx(
     np.mean([c["normalized_return"] for c in clips])

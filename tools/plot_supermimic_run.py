@@ -8,9 +8,9 @@ return per survived step, ``*_survived``). Writes three PNGs (150 dpi) in ``--ou
 (default ``<run_dir>/figures/``) and prints a markdown table of the checkpoint
 evaluations:
 
-- ``training_curves.png``: 3x3 grid vs iteration (world-model losses, policy / critic
-  losses, imagined rollout statistics, simulator return, episode length, sampler
-  statistics, time per iteration split by phase);
+- ``training_curves.png``: 8 panels of a 3x3 grid vs iteration (world-model loss,
+  policy / critic losses, imagined rollout statistics, simulator return, episode
+  length, sampler statistics, time per iteration split by phase);
 - ``library_eval.png``: mean and frame-weighted normalised return per clip length
   (solid) and per survived step (dashed, when the JSON has it), and number of failed
   clips, vs checkpoint iteration;
@@ -147,12 +147,6 @@ def plot_training_curves(
   merge_legends(ax, twin_ax)
 
   ax = axes[0, 1]
-  plot_line(ax, it, metrics["Loss/world_model_termination"], "termination BCE", red)
-  style_axis(
-    ax, "World model: termination loss", "binary cross-entropy (log)", log=True
-  )
-
-  ax = axes[0, 2]
   plot_line(ax, it, metrics["Loss/policy"], "policy loss", blue)
   style_axis(ax, "Policy loss and gradient norm", "policy loss")
   ax.tick_params(axis="y", colors=blue)
@@ -160,7 +154,7 @@ def plot_training_curves(
   plot_line(twin_ax, it, metrics["Metrics/policy_grad_norm"], "grad norm", orange)
   merge_legends(ax, twin_ax)
 
-  ax = axes[1, 0]
+  ax = axes[0, 2]
   plot_line(
     ax,
     it,
@@ -172,11 +166,11 @@ def plot_training_curves(
   style_axis(ax, "Imagined rollouts", "fraction (0 to 1)")
   ax.legend(fontsize=9, loc="best")
 
-  ax = axes[1, 1]
+  ax = axes[1, 0]
   plot_line(ax, it, metrics["Loss/critic"], "critic loss", blue)
   style_axis(ax, "Critic loss", "critic loss (log)", log=True)
 
-  ax = axes[1, 2]
+  ax = axes[1, 1]
   plot_line(ax, it, metrics["Train/normalized_return"], "normalised return", blue)
   plot_line(ax, it, metrics["Train/termination_rate"], "termination rate", red)
   style_axis(
@@ -184,11 +178,11 @@ def plot_training_curves(
   )
   ax.legend(fontsize=9, loc="best")
 
-  ax = axes[2, 0]
+  ax = axes[1, 2]
   plot_line(ax, it, metrics["Train/mean_episode_length"], "mean episode length", blue)
   style_axis(ax, "Episode length", "mean episode length (steps)")
 
-  ax = axes[2, 1]
+  ax = axes[2, 0]
   plot_line(ax, it, metrics["Metrics/sampler_reset_entropy"], "reset entropy", blue)
   style_axis(ax, "Reset sampler", "entropy of the reset distribution")
   ax.tick_params(axis="y", colors=blue)
@@ -207,7 +201,7 @@ def plot_training_curves(
     bbox_to_anchor=(1, 0.62),
   )
 
-  ax = axes[2, 2]
+  ax = axes[2, 1]
   phases = [
     ("Perf/sim_time", "simulation"),
     ("Perf/world_model_time", "world model"),
@@ -228,6 +222,7 @@ def plot_training_curves(
     ax, "Time per iteration (one-off spikes clipped)", "seconds per iteration (stacked)"
   )
   ax.legend(fontsize=9, loc="upper left")
+  axes[2, 2].axis("off")
 
   fig.suptitle(title, fontsize=16)
   fig.tight_layout(rect=(0, 0, 1, 0.97))

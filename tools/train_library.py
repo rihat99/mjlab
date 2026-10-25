@@ -1,5 +1,6 @@
 """Train, play or evaluate one SuperMimic tracker on a motion library, fully local.
 
+The task is ``Mjlab-Tracking-Flat-Unitree-G1-SuperMimic`` (``TASK``).
 Train on the library = the kept clips of <motions-dir>/manifest.json if there is one
 (tools/filter_seed.py), else every npz of <motions-dir> (sorted), or the ``--clips``
 subset. Run dir <log-root>/<timestamp>[_<tag>]/ holding params/, TensorBoard events,
@@ -163,12 +164,22 @@ def resolve_checkpoint(args: argparse.Namespace) -> Path:
 def run_library(run_dir: Path, motions_dir: Path) -> list[Path]:
   """The motion files a run trained on, from its ``params/env.yaml``.
 
-  A recorded file that no longer exists is taken from ``motions_dir`` by name.
+  A recorded file that no longer exists is taken from ``motions_dir`` by name; a
+  recorded ``.txt`` clip list that no longer exists (a run made on another machine)
+  is replaced by the library of ``motions_dir`` (``kept_clips``).
   """
   env_cfg = yaml.load(
     (run_dir / "params" / "env.yaml").read_text(), Loader=ParamsLoader
   )
   recorded = env_cfg["commands"]["motion"]["motion_file"]
+  if isinstance(recorded, str) and recorded.endswith(".txt"):
+    if not Path(recorded).is_file():
+      print(
+        f"[train_library] clip list {recorded} not found, using the library of "
+        f"{motions_dir}",
+        flush=True,
+      )
+      return kept_clips(motions_dir)
   library = [Path(path) for path in expand_motion_files(recorded)]
   moved = [path for path in library if not path.is_file()]
   if moved:
@@ -208,7 +219,6 @@ def main() -> None:
     "--clips", help="train: comma-separated clip ids of <motions-dir> (default: all)"
   )
   parser.add_argument("--clip", help="play: clip id of the run's library")
-  parser.add_argument("--task", default=TASK, help="mjlab task id")
   parser.add_argument("--motions-dir", type=Path, default=MOTIONS_DIR)
   parser.add_argument("--log-root", type=Path, default=LOG_ROOT)
   parser.add_argument(
@@ -248,7 +258,7 @@ def main() -> None:
     # mjlab writes runs to <--log-root>/<experiment-name>/<timestamp>[_<run-name>].
     command = [
       str(bin_dir / "train"),
-      args.task,
+      TASK,
       "--env.commands.motion.motion-file",
       str(motion_list),
       "--env.scene.num-envs",
@@ -281,7 +291,7 @@ def main() -> None:
         sys.executable,
         "-m",
         "mjlab.tasks.tracking.scripts.evaluate_library",
-        args.task,
+        TASK,
         "--checkpoint-file",
         str(checkpoint),
         "--motion-files",
@@ -297,7 +307,7 @@ def main() -> None:
       video_length = args.video_length or len(np.load(motion)["joint_pos"])
       command = [
         str(bin_dir / "play"),
-        args.task,
+        TASK,
         "--checkpoint-file",
         str(checkpoint),
         "--motion-file",
@@ -319,7 +329,6 @@ def main() -> None:
     os.environ,
     CUDA_VISIBLE_DEVICES=str(args.gpu),
     MUJOCO_EGL_DEVICE_ID=str(args.gpu),
-    WANDB_MODE="disabled",
     MUJOCO_GL="egl",
     PYTHONUNBUFFERED="1",
   )

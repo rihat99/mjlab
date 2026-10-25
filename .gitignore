@@ -13,6 +13,8 @@ artifacts/
 .venv/
 render_robots.py
 benchmark_results/
+checkpoints/*/eval_library_*.json
+checkpoints/*/figures/
 
 # Documentation outputs.
 **/_build/*

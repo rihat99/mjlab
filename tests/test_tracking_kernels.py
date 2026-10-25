@@ -1,9 +1,5 @@
 """Tests for the pure tracking kernels behind the tracking env terms."""
 
-import os
-from pathlib import Path
-
-import numpy as np
 import pytest
 import torch
 from conftest import get_test_device, write_g1_motion_npz
@@ -296,28 +292,3 @@ def test_kernels_on_fk_state_match_env_terms(env: ManagerBasedRlEnv) -> None:
       dim=-1,
     )
     torch.testing.assert_close(proprio, env_proprio, atol=1e-5, rtol=0)
-
-
-def _parity_files() -> tuple[Path, Path] | None:
-  before = os.environ.get("TRACKING_PARITY_BEFORE")
-  after = os.environ.get("TRACKING_PARITY_AFTER")
-  if before is None or after is None:
-    return None
-  paths = Path(before), Path(after)
-  return paths if all(path.is_file() for path in paths) else None
-
-
-@pytest.mark.skipif(
-  _parity_files() is None,
-  reason="set TRACKING_PARITY_BEFORE/AFTER to rollouts recorded by record_baseline.py",
-)
-def test_recorded_rollout_parity() -> None:
-  """A fixed-seed CPU rollout recorded before the kernel refactor matches one after."""
-  files = _parity_files()
-  assert files is not None
-  before, after = (np.load(path) for path in files)
-  for key in ("reward_term_names", "termination_term_names", "time_steps"):
-    np.testing.assert_array_equal(before[key], after[key])
-  np.testing.assert_array_equal(before["terminations"], after["terminations"])
-  for key in ("step_reward", "actor", "critic", "qpos", "qvel"):
-    np.testing.assert_allclose(before[key], after[key], atol=1e-6, rtol=0, err_msg=key)

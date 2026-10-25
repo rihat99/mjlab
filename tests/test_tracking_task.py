@@ -36,8 +36,9 @@ def test_tracking_tasks_have_motion_command(tracking_task_ids: list[str]) -> Non
 def test_tracking_tasks_have_self_collision_sensor(
   tracking_task_ids: list[str],
 ) -> None:
-  """All tracking tasks should have a self_collision sensor."""
-  for task_id in tracking_task_ids:
+  """Tracking tasks with robot self-collision should have a self_collision sensor."""
+  # SuperMimic turns robot self-collision off (ground contacts only), so no sensor.
+  for task_id in [t for t in tracking_task_ids if "SuperMimic" not in t]:
     cfg = load_env_cfg(task_id)
 
     assert cfg.scene.sensors is not None, f"Task {task_id} has no sensors"

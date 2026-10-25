@@ -50,12 +50,8 @@ class MotionPolicy(nn.Module):
     with torch.no_grad():
       last.weight.mul_(0.01)
       last.bias.zero_()
-    self.obs_normalizer: nn.Module = (
-      EmpiricalNormalization(self.obs_dim) if cfg.obs_normalization else nn.Identity()
-    )
-    self.goal_normalizer: nn.Module = (
-      EmpiricalNormalization(goal_dim) if cfg.obs_normalization else nn.Identity()
-    )
+    self.obs_normalizer = EmpiricalNormalization(self.obs_dim)
+    self.goal_normalizer = EmpiricalNormalization(goal_dim)
 
   def frames_from_env_layout(self, obs_hist: torch.Tensor) -> torch.Tensor:
     """Term-major history (B, history * obs_dim) -> frames (B, history, obs_dim)."""
@@ -82,12 +78,8 @@ class MotionPolicy(nn.Module):
   @torch.no_grad()
   def update_normalizers(self, obs_hist: torch.Tensor, goal: torch.Tensor) -> None:
     """Update the running statistics with the newest env history frame and the goal."""
-    if isinstance(self.obs_normalizer, EmpiricalNormalization):
-      _update_in_place(
-        self.obs_normalizer, self.frames_from_env_layout(obs_hist)[:, -1]
-      )
-    if isinstance(self.goal_normalizer, EmpiricalNormalization):
-      _update_in_place(self.goal_normalizer, goal)
+    _update_in_place(self.obs_normalizer, self.frames_from_env_layout(obs_hist)[:, -1])
+    _update_in_place(self.goal_normalizer, goal)
 
 
 def _update_in_place(normalizer: EmpiricalNormalization, x: torch.Tensor) -> None:

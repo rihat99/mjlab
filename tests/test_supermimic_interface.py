@@ -1,8 +1,6 @@
-"""TrackingModelInterface vs the live SuperMimic env (2 LAFAN clips, 8 envs, noise off,
-random actions, 100 steps): observation, goal, termination and reward heads, state
-read-out, terminal snapshots, frame bookkeeping and gradients. Every test runs on
-both goal layouts (the reference layout of the default task, the anchor layout of
-``-AnchorGoal``).
+"""TrackingModelInterface vs the live SuperMimic env (2 synthetic G1 clips, 8 envs,
+noise off, random actions, 100 steps): observation, goal, termination and reward
+heads, state read-out, terminal snapshots, frame bookkeeping and gradients.
 
 The env scores a step on body kinematics one physics substep stale (the forward inside
 the last ``mj_step``) and on relative body targets built from the previous state's
@@ -10,13 +8,11 @@ anchor. A per-substep probe records the stale state so the env's numbers can be
 reproduced exactly; the interface itself scores the reached state s_next.
 """
 
-import os
-from pathlib import Path
 from typing import cast
 
 import pytest
 import torch
-from conftest import get_test_device
+from conftest import get_test_device, write_g1_motion_npz
 
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.managers.metrics_manager import MetricsTermCfg
@@ -29,33 +25,13 @@ from mjlab.tasks.tracking.mdp.kinematics import TorchKinematics
 from mjlab.tasks.tracking.supermimic import TrackingModelInterface
 from mjlab.tasks.tracking.supermimic.recorder import floating_base_state
 
-TASKS = {
-  "reference": "Mjlab-Tracking-Flat-Unitree-G1-SuperMimic",
-  "anchor": "Mjlab-Tracking-Flat-Unitree-G1-SuperMimic-AnchorGoal",
-}
-# (obs_dim, goal_dim, obs_term_dims) per layout.
-DIMS = {
-  "reference": (99, 730, (29, 29, 3, 3, 29, 6)),
-  "anchor": (93, 670, (29, 29, 3, 3, 29)),
-}
-# Data root as in tools/paths.py: $MJLAB_DATA, default <repo>/../retarget_test/mjlab.
-DATA_ROOT = Path(
-  os.environ.get(
-    "MJLAB_DATA", Path(__file__).resolve().parents[2] / "retarget_test/mjlab"
-  )
-)
-LAFAN = DATA_ROOT / "motions_lafan"
-CLIPS = ("dance1_subject1.npz", "walk1_subject1.npz")
+TASK_ID = "Mjlab-Tracking-Flat-Unitree-G1-SuperMimic"
+OBS_TERM_DIMS = (29, 29, 3, 3, 29, 6)
+OBS_DIM, GOAL_DIM = 99, 730
 NUM_ENVS = 8
 NUM_STEPS = 100
 # Envs started 3 frames before their clip end: motion_end fires on their third step.
 NEAR_END = {0: 0, 1: 1}  # env -> clip
-RELATIVE_TERMS = ("motion_body_pos", "motion_body_ori")
-
-pytestmark = pytest.mark.skipif(
-  not all((LAFAN / clip).is_file() for clip in CLIPS),
-  reason=f"LAFAN npz not found in {LAFAN} (set MJLAB_DATA)",
-)
 
 
 class _SubstepState:
@@ -86,7 +62,7 @@ class _PreResetQpos(RecorderTerm):
 
 
 def _newest_frame(actor: torch.Tensor, term_dims: tuple[int, ...]) -> torch.Tensor:
-  """Last history frame (N, 93) of a term-major flattened history (N, 10 * 93)."""
+  """Last history frame (N, 99) of a term-major flattened history (N, 10 * 99)."""
   history = actor.shape[-1] // sum(term_dims)
   parts = torch.split(actor, [history * d for d in term_dims], dim=-1)
   return torch.cat(
@@ -94,12 +70,17 @@ def _newest_frame(actor: torch.Tensor, term_dims: tuple[int, ...]) -> torch.Tens
   )
 
 
-@pytest.fixture(scope="module", params=list(TASKS), ids=list(TASKS))
-def rollout(request):
-  cfg = load_env_cfg(TASKS[request.param])
+@pytest.fixture(scope="module")
+def rollout(tmp_path_factory: pytest.TempPathFactory):
+  root = tmp_path_factory.mktemp("clips")
+  clips = (
+    write_g1_motion_npz(root / "walk.npz", num_frames=150),
+    write_g1_motion_npz(root / "sway.npz", num_frames=120, amplitude=0.4, speed=0.0),
+  )
+  cfg = load_env_cfg(TASK_ID)
   motion_cmd = cfg.commands["motion"]
   assert isinstance(motion_cmd, MotionCommandCfg)
-  motion_cmd.motion_file = tuple(str(LAFAN / clip) for clip in CLIPS)
+  motion_cmd.motion_file = tuple(str(clip) for clip in clips)
   cfg.observations["actor"].enable_corruption = False
   cfg.metrics["substep_state"] = MetricsTermCfg(func=_SubstepState, per_substep=True)
   cfg.recorders["pre_reset_qpos"] = RecorderTermCfg(func=_PreResetQpos, params={})
@@ -119,7 +100,6 @@ def rollout(request):
   substep = _SubstepState.instance
   assert substep is not None
   pre_reset = cast(_PreResetQpos, env.recorder_manager.get_term("pre_reset_qpos"))
-  reward_manager = env.reward_manager
   generator = torch.Generator(device=device).manual_seed(0)
   steps = []
   for _ in range(NUM_STEPS):
@@ -140,7 +120,7 @@ def rollout(request):
     record |= {
       "a": action,
       "reward": reward.clone(),
-      "terms": reward_manager._step_reward.clone() * env.step_dt,
+      "terms": env.reward_manager._step_reward.clone() * env.step_dt,
       "terminated": terminated,
       "truncated": truncated.clone(),
       "s_post": s_post,
@@ -156,7 +136,7 @@ def rollout(request):
       "pre_reset_qpos": pre_reset.qpos,
     }
     steps.append(record)
-  yield env, iface, steps, request.param
+  yield env, iface, steps
   env.close()
 
 
@@ -165,13 +145,12 @@ def _stack(steps: list[dict], key: str) -> torch.Tensor:
 
 
 def test_dims_and_context(rollout) -> None:
-  env, iface, _, layout = rollout
-  obs_dim, goal_dim, term_dims = DIMS[layout]
-  assert (iface.state_dim, iface.obs_dim, iface.goal_dim) == (71, obs_dim, goal_dim)
+  env, iface, _ = rollout
+  assert (iface.state_dim, iface.obs_dim, iface.goal_dim) == (71, OBS_DIM, GOAL_DIM)
   assert (iface.context_dim, iface.feature_dim, iface.action_dim) == (33, 68, 29)
-  assert iface.obs_term_dims == term_dims
+  assert iface.obs_term_dims == OBS_TERM_DIMS
   group_dims = env.observation_manager.group_obs_dim
-  assert group_dims["actor"] == (10 * obs_dim,) and group_dims["goal"] == (goal_dim,)
+  assert group_dims["actor"] == (10 * OBS_DIM,) and group_dims["goal"] == (GOAL_DIM,)
   assert iface.max_step_reward == pytest.approx(0.1)
   context = iface.context_normalized()
   assert context.shape == (NUM_ENVS, 33)
@@ -188,7 +167,7 @@ def test_dims_and_context(rollout) -> None:
 
 
 def test_observation_and_goal_match_env(rollout) -> None:
-  _, iface, steps, _ = rollout
+  _, iface, steps = rollout
   env_idx = torch.arange(NUM_ENVS, device=steps[0]["s"].device)
   obs_err = goal_err = 0.0
   for step in steps:
@@ -197,53 +176,39 @@ def test_observation_and_goal_match_env(rollout) -> None:
     goal = iface.goal(step["s_post"], step["frame_post"])
     obs_err = max(obs_err, float((obs - newest).abs().max()))
     goal_err = max(goal_err, float((goal - step["goal"]).abs().max()))
-  print(f"\nobservation max abs err {obs_err:.2e}, goal max abs err {goal_err:.2e}")
   assert obs_err <= 1e-5
   assert goal_err <= 1e-5
 
 
 def test_termination_matches_env(rollout) -> None:
-  _, iface, steps, _ = rollout
-  terminated = _stack(steps, "terminated")
+  _, iface, steps = rollout
+  terminated = _stack(steps, "terminated").flatten()
   frames = _stack(steps, "frame").flatten()
-  on_stale = iface.termination_hard(_stack(steps, "stale").flatten(0, 1), frames)
-  on_next = iface.termination_hard(_stack(steps, "s_next").flatten(0, 1), frames)
-  count = int(terminated.sum())
-  mismatch = int((on_next != terminated.flatten()).sum())
-  print(f"\n{count} terminations; rule on s_next differs in {mismatch} transitions")
-  assert count >= 3
-  # The env's rule saw the state one substep before s_next.
-  assert torch.equal(on_stale, terminated.flatten())
+  assert int(terminated.sum()) >= 3
+  # The env's rule saw the state one substep before s_next. At vanishing
+  # temperatures the soft rule is the env's threshold rule.
+  stale = _stack(steps, "stale").flatten(0, 1)
+  soft = iface.termination_soft(stale, frames, z_temp=1e-6, tilt_temp=1e-6)
+  assert torch.equal(soft > 0.5, terminated)
 
 
 def test_reward_matches_env(rollout) -> None:
-  env, iface, steps, _ = rollout
-  names = env.reward_manager.active_terms
-  gaps, term_gaps = [], dict.fromkeys(names, 0.0)
+  _, iface, steps = rollout
+  gaps = []
   for step in steps:
     terms = iface.reward_terms(step["s_next"], step["a"], step["a_prev"], step["frame"])
     reward = iface.reward(step["s_next"], step["a"], step["a_prev"], step["frame"])
     torch.testing.assert_close(reward, torch.stack(list(terms.values())).sum(0))
     gaps.append(float((reward - step["reward"]).abs().max()))
-    for i, name in enumerate(names):
-      gap = float((terms[name] - step["terms"][:, i]).abs().max())
-      term_gaps[name] = max(term_gaps[name], gap)
-  gaps_t = torch.tensor(gaps)
-  print(
-    f"\nreward vs env: per-step max abs diff max {gaps_t.max():.2e}, "
-    f"mean {gaps_t.mean():.2e} (max step reward 0.1); per term max:"
-  )
-  for name, value in term_gaps.items():
-    print(f"  {name:24s} {value:.2e}")
   # The gap is the env's timing (next test reproduces the env to 1e-6). Under these
-  # violent random actions it reaches ~5e-3 (5 % of the max step reward).
-  assert gaps_t.max() <= 1e-2
+  # violent random actions it reaches ~6e-3 (6 % of the max step reward).
+  assert max(gaps) <= 1e-2
 
 
 def test_env_reward_reproduced_from_stale_state(rollout) -> None:
   """Pins the cause of the reward gap: on the stale state, with the relative targets
   the env built from the previous anchor, every env term is reproduced."""
-  env, iface, steps, _ = rollout
+  env, iface, steps = rollout
   names = env.reward_manager.active_terms
   kinematics = TorchKinematics(
     env.sim.mj_model,
@@ -275,14 +240,11 @@ def test_env_reward_reproduced_from_stale_state(rollout) -> None:
     for i, name in enumerate(names):
       value = expected.get(name, on_stale[name])
       err[name] = max(err[name], float((value - step["terms"][:, i]).abs().max()))
-  print("\nper-term max abs diff to the env, stale state + previous anchor:")
-  for name, value in err.items():
-    print(f"  {name:24s} {value:.2e}")
   assert max(err.values()) <= 1e-6
 
 
 def test_state_read_out(rollout) -> None:
-  env, iface, steps, _ = rollout
+  env, iface, _ = rollout
   robot = env.scene["robot"]
   s = iface.state_from_sim()
   pos, quat, lin_vel, ang_vel, q, qd = FloatingBaseState(iface.nq).split(s)
@@ -299,7 +261,7 @@ def test_state_read_out(rollout) -> None:
 
 
 def test_terminal_snapshot(rollout) -> None:
-  env, iface, steps, _ = rollout
+  env, iface, steps = rollout
   robot = env.scene["robot"]
   checked = 0
   for step in steps:
@@ -319,7 +281,7 @@ def test_terminal_snapshot(rollout) -> None:
 
 
 def test_frame_bookkeeping(rollout) -> None:
-  _, iface, steps, _ = rollout
+  _, iface, steps = rollout
   frame, frame_post = _stack(steps, "frame"), _stack(steps, "frame_post")
   truncated = _stack(steps, "truncated")
   done = _stack(steps, "terminated") | truncated
@@ -335,7 +297,7 @@ def test_frame_bookkeeping(rollout) -> None:
 
 
 def test_gradients_are_finite(rollout) -> None:
-  _, iface, steps, _ = rollout
+  _, iface, steps = rollout
   s_next = _stack(steps, "s_next").flatten(0, 1).requires_grad_(True)
   frames = _stack(steps, "frame").flatten()
   a, a_prev = _stack(steps, "a").flatten(0, 1), _stack(steps, "a_prev").flatten(0, 1)
@@ -357,7 +319,7 @@ def test_gradients_are_finite(rollout) -> None:
 
 
 def test_termination_soft(rollout) -> None:
-  _, iface, steps, _ = rollout
+  _, iface, steps = rollout
   # Reset states sit on their reference (anchor errors of a few cm / centiradians).
   s, frames = steps[0]["s"], steps[0]["frame"]
   states = torch.cat(
@@ -366,7 +328,6 @@ def test_termination_soft(rollout) -> None:
   states.requires_grad_(True)
   soft = iface.termination_soft(states, frames.repeat(3)).view(3, NUM_ENVS)
   inside, near, outside = soft
-  print(f"\nsoft termination inside {inside.max():.1e}, outside {outside.min():.6f}")
   assert torch.all((soft >= 0) & (soft <= 1))
   assert torch.all(inside < 1e-3) and torch.all(outside > 1 - 1e-3)
   # Root raised by the height threshold: the anchor error is near it, d in (0, 1).
@@ -374,6 +335,3 @@ def test_termination_soft(rollout) -> None:
   grad = torch.autograd.grad(soft.sum(), states)[0]
   assert torch.isfinite(grad).all()
   assert torch.all(grad.view(3, NUM_ENVS, -1)[1, :, 2] > 0)
-  # Where the soft rule is saturated it agrees with the hard rule.
-  hard = iface.termination_hard(states.detach(), frames.repeat(3)).view(3, NUM_ENVS)
-  assert not hard[0].any() and hard[2].all()

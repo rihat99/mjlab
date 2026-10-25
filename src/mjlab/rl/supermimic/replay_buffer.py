@@ -16,11 +16,11 @@ class ReplayBuffer:
   """Ring buffer of the last ``capacity`` transitions of every env.
 
   Row j of env n holds the transition that started at state s_j: the state, the executed
-  (noisy) action, the reference frame k_j, the env reward, whether the step terminated,
-  whether it ended the episode (terminated or truncated), the captured pre-reset state
-  s_{j+1} when it did (the next row then starts a new episode) and the step index within
-  the episode. Storage is time-major, (capacity, num_envs, ...). Ages count rows from
-  the oldest stored one (age 0) to the newest (age size - 1).
+  (noisy) action, the reference frame k_j, whether the step ended the episode
+  (terminated or truncated), the captured pre-reset state s_{j+1} when it did (the next
+  row then starts a new episode) and the step index within the episode. Storage is
+  time-major, (capacity, num_envs, ...). Ages count rows from the oldest stored one
+  (age 0) to the newest (age size - 1).
   """
 
   def __init__(
@@ -38,8 +38,6 @@ class ReplayBuffer:
     self.state = torch.zeros((*shape, state_dim), device=self.device)
     self.action = torch.zeros((*shape, action_dim), device=self.device)
     self.frame = torch.zeros(shape, dtype=torch.long, device=self.device)
-    self.reward = torch.zeros(shape, device=self.device)
-    self.terminated = torch.zeros(shape, dtype=torch.bool, device=self.device)
     self.done = torch.zeros(shape, dtype=torch.bool, device=self.device)
     self.terminal_state = torch.zeros((*shape, state_dim), device=self.device)
     self.episode_step = torch.zeros(shape, dtype=torch.int32, device=self.device)
@@ -51,8 +49,6 @@ class ReplayBuffer:
     state: torch.Tensor,
     action: torch.Tensor,
     frame: torch.Tensor,
-    reward: torch.Tensor,
-    terminated: torch.Tensor,
     done: torch.Tensor,
     terminal_state: torch.Tensor,
     episode_step: torch.Tensor,
@@ -62,8 +58,6 @@ class ReplayBuffer:
     self.state[row] = state
     self.action[row] = action
     self.frame[row] = frame
-    self.reward[row] = reward
-    self.terminated[row] = terminated
     self.done[row] = done
     self.terminal_state[row] = terminal_state
     self.episode_step[row] = episode_step
@@ -108,7 +102,7 @@ class ReplayBuffer:
         return torch.cat(ages), torch.cat(envs)
     raise RuntimeError(
       "Replay buffer: too few valid rows to sample from (are all clips shorter than "
-      "the imagination horizon, or is the buffer nearly empty?)."
+      "the imagination horizon plus the seed margin, or is the buffer nearly empty?)."
     )
 
   def sample_windows(self, batch_size: int, k: int) -> dict[str, torch.Tensor]:
@@ -121,8 +115,8 @@ class ReplayBuffer:
 
     Returns:
       s0 (B, S) start state; actions (B, k, A) executed actions; targets (B, k, S)
-      states reached by each transition; terminated (B, k) bool; valid (B, k) float
-      (1 up to and including the first done); frames (B, k) int64; env_idx (B,) int64.
+      states reached by each transition; valid (B, k) float (1 up to and including
+      the first done); env_idx (B,) int64.
     """
     assert self.size >= k + 1, "replay buffer holds fewer than k + 1 steps"
     offsets = torch.arange(k, device=self.device)
@@ -143,9 +137,7 @@ class ReplayBuffer:
       "s0": self.state[rows[:, 0], env],
       "actions": self.action[rows, env_k],
       "targets": self._next_state(rows, env_k),
-      "terminated": self.terminated[rows, env_k],
       "valid": valid,
-      "frames": self.frame[rows, env_k],
       "env_idx": env,
     }
 
@@ -209,8 +201,7 @@ class ReplayBuffer:
   def iter_transitions(self, chunk_size: int) -> Iterator[dict[str, torch.Tensor]]:
     """Yield every stored transition whose next state is known, in chunks.
 
-    Each chunk has state (M, S), action (M, A), next_state (M, S), frame (M,),
-    env_idx (M,).
+    Each chunk has state (M, S), action (M, A), next_state (M, S), env_idx (M,).
     """
     num_ages = self.size - 1
     ages = torch.arange(num_ages, device=self.device).repeat_interleave(self.num_envs)
@@ -222,6 +213,5 @@ class ReplayBuffer:
         "state": self.state[rows, env],
         "action": self.action[rows, env],
         "next_state": self._next_state(rows, env),
-        "frame": self.frame[rows, env],
         "env_idx": env,
       }

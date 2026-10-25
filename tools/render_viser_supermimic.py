@@ -14,7 +14,8 @@ policy step: the reward and the reference frame the step is scored against
 and joint angles are the reference ghost. Both ghosts hold over the 4 substeps of a
 policy step.
 
-Rendered: a window of WINDOW_S seconds (default: the one with the largest summed
+Rendered: a window of WINDOW_S seconds, or the whole clip if it is shorter, starting
+at the ``--window-start`` scored frame (default: the window with the largest summed
 reference root speed), one frame per policy step (50 fps, the state at the end of the
 step), each frame two browser renders blended (without the ghost and with an opaque
 ghost, at GHOST_OPACITY). Outputs in ``<out-dir>/<clip>/``:
@@ -92,6 +93,7 @@ def rollout(checkpoint: Path, motion: Path) -> dict:
   from mjlab.tasks.registry import load_rl_cfg, load_runner_cls
   from mjlab.tasks.tracking.mdp.commands import MotionCommand
   from mjlab.tasks.tracking.scripts.evaluate_library import make_library_env
+  from mjlab.tasks.tracking.supermimic.model_interface import max_step_reward
   from mjlab.utils.torch import configure_torch_backends
 
   configure_torch_backends()
@@ -113,9 +115,7 @@ def rollout(checkpoint: Path, motion: Path) -> dict:
   free_q_adr = robot.indexing.free_joint_q_adr.cpu().numpy()
   # (29,), robot joint order (the command's order)
   joint_q_adr = robot.indexing.joint_q_adr.cpu().numpy()
-  max_step_reward = env.step_dt * sum(
-    term.weight for term in env.cfg.rewards.values() if term.weight > 0
-  )
+  max_reward = max_step_reward(env)
 
   obs, _ = vec_env.reset()
   sub_qpos, sub_ctrl = [], []
@@ -154,8 +154,8 @@ def rollout(checkpoint: Path, motion: Path) -> dict:
     "step_ref_qpos": np.array(step_ref_qpos),
     "failed": failed,
     "num_frames": num_frames,
-    "max_step_reward": max_step_reward,
-    "normalized_return": sum(step_reward) / (max_step_reward * (num_frames - 1)),
+    "max_step_reward": max_reward,
+    "normalized_return": sum(step_reward) / (max_reward * (num_frames - 1)),
     "physics_dt": env.physics_dt,
     "step_dt": env.step_dt,
     "decimation": env.cfg.decimation,
@@ -357,7 +357,6 @@ def main() -> None:
     CUDA_VISIBLE_DEVICES=str(args.gpu),
     MUJOCO_EGL_DEVICE_ID=str(args.gpu),
     MUJOCO_GL="egl",
-    WANDB_MODE="disabled",
   )
   import viser
 
@@ -376,8 +375,11 @@ def main() -> None:
     flush=True,
   )
 
-  num_steps = round(WINDOW_S / states["step_dt"])
-  first_frame = args.window_start or best_window(motion, num_steps)
+  # A clip of F frames scores frames 1 .. F - 1.
+  num_steps = min(round(WINDOW_S / states["step_dt"]), states["num_frames"] - 1)
+  first_frame = args.window_start
+  if first_frame is None:
+    first_frame = best_window(motion, num_steps)
   window = window_states(states, first_frame, num_steps)
   last_frame = first_frame + num_steps - 1
   print(

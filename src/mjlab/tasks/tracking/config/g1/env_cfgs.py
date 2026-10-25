@@ -1,7 +1,5 @@
 """Unitree G1 flat tracking environment configurations."""
 
-from typing import Literal
-
 from mjlab.asset_zoo.robots import (
   G1_ACTION_SCALE,
   get_g1_robot_cfg,
@@ -116,54 +114,41 @@ def unitree_g1_flat_tracking_env_cfg(
 
 def unitree_g1_flat_tracking_supermimic_env_cfg(
   play: bool = False,
-  self_collision: bool = False,
-  friction_all_geoms: bool = True,
-  goal: Literal["reference", "anchor"] = "reference",
 ) -> ManagerBasedRlEnvCfg:
   """Baseline tracking cfg changed to the SuperMimic paper's env (Tables A.1-A.3).
 
   No pushes, no self-collision penalty, joint-limit weight -2, no end-effector
-  termination, and the clip end is a time-out (``motion_end``). Observation groups:
-  ``actor`` = 10-frame history of [joint_pos, joint_vel, base_ang_vel,
-  projected_gravity, actions] (flattened term-major, each term's frames oldest
-  first) and ``goal`` = reference frames k_t .. k_t + 9, k_t being the frame the
-  next reward is scored against. There is no critic group. ``goal="reference"``
-  (Uni-SuperMimic's layout, deployable without a position estimate): the goal holds
-  the reference only, in the heading frame of the current frame k_t - 1
-  (``motion_future_frames_reference``, 730), and the actor gains the orientation
-  error to that frame (``motion_current_anchor_ori_b``, 99 per frame, 990).
-  ``goal="anchor"`` (the layout of the checkpoints before 2026-10-24): the frames
-  seen from the robot anchor (``motion_future_frames_b``, 670), actor 93 per frame
-  (930).
+  termination, and the clip end is a time-out (``motion_end``). The anchor is the
+  root (pelvis). Observation groups, in Uni-SuperMimic's layout (deployable without
+  a position estimate): ``actor`` = 10-frame history of [joint_pos, joint_vel,
+  base_ang_vel, projected_gravity, actions, orientation error of the robot anchor
+  to the reference anchor of the current frame k_t - 1
+  (``motion_current_anchor_ori_b``)], 99 per frame, 990 (flattened term-major, each
+  term's frames oldest first); ``goal`` = reference frames k_t .. k_t + 9 in the
+  heading frame of frame k_t - 1, independent of the robot state
+  (``motion_future_frames_reference``, 730), k_t being the frame the next reward is
+  scored against. There is no critic group.
   ``commands.motion.motion_file`` takes a tuple of npz paths (the clip library) or a
   ``.txt`` file listing them.
   The ``terminal_state`` recorder keeps the pre-reset state of auto-reset envs.
 
   Contact physics as in Uni-SuperMimic and supermimic_vibed (the paper leaves it
-  open): ``self_collision=False`` keeps robot-ground contacts only.
-  ``friction_all_geoms=True`` randomises the friction of every robot collision geom
-  (one value per env) instead of the feet only, and lowers the ground to 0.3 in
-  training: MuJoCo uses the larger friction of two equal-priority geoms, so with
-  the default ground of 1.0 only the feet (priority 1) would see the sampled value.
-  The play cfg keeps the ground at 1.0 and sets every randomised geom to 1.0.
-  ``self_collision=True, friction_all_geoms=False`` is the physics of the 14k
-  torso-anchor runs.
+  open): robot-ground contacts only (no self-collision), and the friction of every
+  robot collision geom is randomised (one value per env) instead of the feet only,
+  with the ground lowered to 0.3 in training: MuJoCo uses the larger friction of two
+  equal-priority geoms, so with the default ground of 1.0 only the feet (priority 1)
+  would see the sampled value. The play cfg keeps the ground at 1.0 and sets every
+  randomised geom to 1.0.
   """
   cfg = unitree_g1_flat_tracking_env_cfg(play=play)
-  if not self_collision:
-    cfg.scene.entities["robot"].collisions = (FULL_COLLISION_WITHOUT_SELF,)
-    # Its only reader, the self_collisions reward, is removed below.
-    cfg.scene.sensors = tuple(
-      s for s in cfg.scene.sensors if s.name != "self_collision"
-    )
-  if friction_all_geoms:
-    # Keeps its name: the model interface reads the friction context from it.
-    cfg.events["foot_friction"].params["asset_cfg"].geom_names = r".*_collision$"
-    if not play:
-      assert cfg.scene.terrain is not None
-      cfg.scene.terrain.geoms = (
-        GeomCfg(geom_names_expr=("terrain",), friction=(0.3,)),
-      )
+  cfg.scene.entities["robot"].collisions = (FULL_COLLISION_WITHOUT_SELF,)
+  # Its only reader, the self_collisions reward, is removed below.
+  cfg.scene.sensors = tuple(s for s in cfg.scene.sensors if s.name != "self_collision")
+  # Keeps its name: the model interface reads the friction context from it.
+  cfg.events["foot_friction"].params["asset_cfg"].geom_names = r".*_collision$"
+  if not play:
+    assert cfg.scene.terrain is not None
+    cfg.scene.terrain.geoms = (GeomCfg(geom_names_expr=("terrain",), friction=(0.3,)),)
   cfg.recorders["terminal_state"] = RecorderTermCfg(
     func=TerminalStateRecorder, params={"entity_name": "robot"}
   )
@@ -185,18 +170,13 @@ def unitree_g1_flat_tracking_supermimic_env_cfg(
       func=mdp.projected_gravity, noise=Unoise(n_min=-0.05, n_max=0.05)
     ),
     "actions": actor_terms["actions"],
-  }
-  if goal == "reference":
     # Uni-SuperMimic's noise scale for the 6D orientation error (mdp.py:30-39).
-    new_actor_terms["motion_anchor_ori"] = ObservationTermCfg(
+    "motion_anchor_ori": ObservationTermCfg(
       func=mdp.motion_current_anchor_ori_b,
       params={"command_name": "motion"},
       noise=Unoise(n_min=-0.05, n_max=0.05),
-    )
-  goal_func = {
-    "reference": mdp.motion_future_frames_reference,
-    "anchor": mdp.motion_future_frames_b,
-  }[goal]
+    ),
+  }
   cfg.observations = {
     "actor": ObservationGroupCfg(
       terms=new_actor_terms,
@@ -207,7 +187,7 @@ def unitree_g1_flat_tracking_supermimic_env_cfg(
     "goal": ObservationGroupCfg(
       terms={
         "motion_future_frames": ObservationTermCfg(
-          func=goal_func,
+          func=mdp.motion_future_frames_reference,
           params={"command_name": "motion", "future_frames": 10},
         ),
       },

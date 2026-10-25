@@ -10,7 +10,7 @@ differentiable forward kinematics of the state (``mdp.kinematics``).
 Timing differences to the env (documented, measured in
 ``tests/test_supermimic_interface.py``): the env scores a step on body kinematics one
 physics substep stale and builds the relative body targets from the anchor of the
-previous state; ``reward`` and ``termination_hard`` use the reached state s_next only.
+previous state; ``reward`` and ``termination_soft`` use the reached state s_next only.
 """
 
 from __future__ import annotations
@@ -41,13 +41,15 @@ if TYPE_CHECKING:
 _COMMAND = "motion"
 _ACTOR = "actor"
 _GOAL = "goal"
-# Actor terms the observation head reproduces, in env order (Table A.1).
+# Actor terms the observation head reproduces, in env order (Table A.1, plus
+# Uni-SuperMimic's orientation error to the current reference frame).
 _ACTOR_FUNCS = (
   mdp.joint_pos_rel,
   mdp.joint_vel_rel,
   mdp.builtin_sensor,
   mdp.projected_gravity,
   mdp.last_action,
+  mdp.motion_current_anchor_ori_b,
 )
 _TRACKING_REWARDS = (
   mdp.motion_global_anchor_position_error_exp,
@@ -57,6 +59,16 @@ _TRACKING_REWARDS = (
   mdp.motion_global_body_linear_velocity_error_exp,
   mdp.motion_global_body_angular_velocity_error_exp,
 )
+
+
+def max_step_reward(env: ManagerBasedRlEnv) -> float:
+  """Largest reward of one env step, every positive term at 1 (the maximum of the
+  tracking terms) and the penalties at 0, scaled by dt as the env reward is; the
+  normaliser of the normalised return."""
+  manager = env.reward_manager
+  weights = [manager.get_term_cfg(name).weight for name in manager.active_terms]
+  scale = env.step_dt if env.cfg.scale_rewards_by_dt else 1.0
+  return scale * sum(w for w in weights if w > 0)
 
 
 class TrackingModelInterface:
@@ -120,13 +132,10 @@ class TrackingModelInterface:
     obs = self._env.observation_manager
     names = obs.active_terms[_ACTOR]
     cfgs = [obs.get_term_cfg(_ACTOR, name) for name in names]
-    funcs = tuple(cfg.func for cfg in cfgs)
-    # The reference goal layout adds the orientation error to the current frame.
-    self._orientation_term = funcs == (*_ACTOR_FUNCS, mdp.motion_current_anchor_ori_b)
-    if funcs != _ACTOR_FUNCS and not self._orientation_term:
+    if tuple(cfg.func for cfg in cfgs) != _ACTOR_FUNCS:
       raise ValueError(
         f"Actor terms {names} are not [joint_pos_rel, joint_vel_rel, builtin_sensor "
-        "(gyro), projected_gravity, last_action] (+ motion_current_anchor_ori_b)."
+        "(gyro), projected_gravity, last_action, motion_current_anchor_ori_b]."
       )
     if not cfgs[0].params.get("biased", False):
       raise ValueError("The joint_pos actor term must use biased=True.")
@@ -147,9 +156,7 @@ class TrackingModelInterface:
       for dims, cfg in zip(term_dims, cfgs, strict=True)
     )
     self.obs_dim = sum(self.obs_term_dims)
-    expected = (self.nq, self.nq, 3, 3, self.action_dim)
-    if self._orientation_term:
-      expected = (*expected, 6)
+    expected = (self.nq, self.nq, 3, 3, self.action_dim, 6)
     if self.obs_term_dims != expected:
       raise ValueError(f"Actor term dims {self.obs_term_dims} != {expected}.")
     if torch.any(self._robot.data.default_joint_vel != 0.0):
@@ -173,18 +180,11 @@ class TrackingModelInterface:
     obs = self._env.observation_manager
     names = obs.active_terms[_GOAL]
     cfgs = [obs.get_term_cfg(_GOAL, name) for name in names]
-    funcs = [cfg.func for cfg in cfgs]
-    # Reference layout (Uni-SuperMimic): 15 + 2 J per frame, no robot state in it;
-    # anchor layout: the frames seen from the robot anchor, 9 + 2 J per frame.
-    self._reference_goal = funcs == [mdp.motion_future_frames_reference]
-    if not self._reference_goal and funcs != [mdp.motion_future_frames_b]:
-      raise ValueError(
-        "The goal group must hold only motion_future_frames_reference or "
-        "motion_future_frames_b."
-      )
+    if [cfg.func for cfg in cfgs] != [mdp.motion_future_frames_reference]:
+      raise ValueError("The goal group must hold only motion_future_frames_reference.")
     self._future_frames: int = cfgs[0].params["future_frames"]
-    per_frame = (15 if self._reference_goal else 9) + 2 * self.nq
-    self.goal_dim = self._future_frames * per_frame
+    # Uni-SuperMimic's layout: 15 + 2 J per frame, no robot state in it.
+    self.goal_dim = self._future_frames * (15 + 2 * self.nq)
     if obs.group_obs_dim[_GOAL] != (self.goal_dim,):
       raise ValueError(f"Goal dim {obs.group_obs_dim[_GOAL]} != ({self.goal_dim},).")
 
@@ -203,7 +203,7 @@ class TrackingModelInterface:
       if cfg.func is mdp.action_rate_l2 and cfg.params.get("action_name") is not None:
         raise ValueError(f"Reward term {name!r}: action_name unsupported.")
       self._reward_terms.append((name, cfg.func, cfg.weight * scale, cfg.params))
-    self.max_step_reward = sum(w for _, _, w, _ in self._reward_terms if w > 0)
+    self.max_step_reward = max_step_reward(env)
 
     limits = self._robot.data.soft_joint_pos_limits
     if not torch.equal(limits, limits[:1].expand_as(limits)):
@@ -307,14 +307,13 @@ class TrackingModelInterface:
     env_idx: torch.Tensor,
     frame: torch.Tensor,
   ) -> torch.Tensor:
-    """(grad) Noise-free actor frame (B, 93 or 99) of state s (B, 71) shown with
-    frame (B,).
+    """(grad) Noise-free actor frame (B, 99) of state s (B, 71) shown with frame
+    (B,).
 
     [q + encoder bias - default q, qd, gyro (root-frame angular velocity), projected
-    gravity, a_prev] and, with the reference goal layout, the reference anchor
-    orientation of frame - 1 in the robot anchor frame (6D,
-    ``mdp.motion_current_anchor_ori_b``); ``env_idx`` (B,) selects the encoder bias
-    and default q.
+    gravity, a_prev, the reference anchor orientation of frame - 1 in the robot
+    anchor frame (6D, ``mdp.motion_current_anchor_ori_b``)]; ``env_idx`` (B,) selects
+    the encoder bias and default q.
     """
     _, quat, _, ang_vel_w, q, qd = self._state.split(s)
     data = self._robot.data
@@ -327,15 +326,13 @@ class TrackingModelInterface:
       data.default_joint_pos[env_idx],
       a_prev,
     )
-    if not self._orientation_term:
-      return obs
     _, anchor_quat = self._anchor_pose(s)
     current = self._command.current_frames(frame)
     ref_quat = self._command.motion.body_quat_w[current, self._anchor].float()
     return torch.cat([obs, kernels.relative_rotation_6d(anchor_quat, ref_quat)], -1)
 
   def add_observation_noise(self, o: torch.Tensor) -> torch.Tensor:
-    """Observation (B, 93) plus fresh additive noise of each actor term's NoiseCfg
+    """Observation (B, 99) plus fresh additive noise of each actor term's NoiseCfg
     (none when the env disables corruption); the gradient of ``o`` is kept."""
     parts = torch.split(o, list(self.obs_term_dims), dim=-1)
     noisy = [
@@ -350,23 +347,10 @@ class TrackingModelInterface:
     return body_pos[:, self._anchor], body_quat[:, self._anchor]
 
   def goal(self, s: torch.Tensor, frame: torch.Tensor) -> torch.Tensor:
-    """(grad) Goal (B, 730 or 670) of state s (B, 71) at frame (B,): the reference
-    frames frame .. frame + K - 1 (clamped to the clip). Reference layout: in the
-    heading frame of frame - 1, independent of s (``MotionCommand.reference_goal``);
-    anchor layout: seen from the robot anchor, as ``mdp.motion_future_frames_b``."""
-    if self._reference_goal:
-      return self._command.reference_goal(frame, self._future_frames)
-    anchor_pos, anchor_quat = self._anchor_pose(s)
-    frames = self._command.future_frames(frame, self._future_frames)
-    motion = self._command.motion
-    return kernels.future_frames_goal(
-      motion.body_pos_w[frames, self._anchor],
-      motion.body_quat_w[frames, self._anchor].float(),
-      motion.joint_pos[frames].float(),
-      motion.joint_vel[frames].float(),
-      anchor_pos,
-      anchor_quat,
-    )
+    """Goal (B, 730) at frame (B,), independent of the state s (B, 71): the
+    reference frames frame .. frame + K - 1 (clamped to the clip) in the heading
+    frame of frame - 1 (``MotionCommand.reference_goal``)."""
+    return self._command.reference_goal(frame, self._future_frames)
 
   def reward_terms(
     self,
@@ -434,21 +418,6 @@ class TrackingModelInterface:
       0
     )
 
-  def termination_hard(self, s_next: torch.Tensor, frame: torch.Tensor) -> torch.Tensor:
-    """Anchor height / tilt failure (B,) bool of s_next (B, 71) against frame (B,),
-    with the env cfg's thresholds."""
-    anchor_pos, anchor_quat = self._anchor_pose(s_next)
-    motion = self._command.motion
-    bad_z, bad_tilt, _, _ = kernels.anchor_termination(
-      anchor_pos,
-      anchor_quat,
-      motion.body_pos_w[frame, self._anchor],
-      motion.body_quat_w[frame, self._anchor].float(),
-      z_thresh=self._z_threshold,
-      tilt_thresh=self._tilt_threshold,
-    )
-    return bad_z | bad_tilt
-
   def termination_soft(
     self,
     s_next: torch.Tensor,
@@ -457,9 +426,9 @@ class TrackingModelInterface:
     tilt_temp: float = 0.04,
   ) -> torch.Tensor:
     """(grad) 1 - (1 - sigmoid((e_z - z_th) / z_temp)) (1 - sigmoid((e_tilt - tilt_th)
-    / tilt_temp)), (B,): the anchor errors of :meth:`termination_hard` for s_next
-    (B, 71) against frame (B,), thresholds from the env cfg (supermimic_vibed's
-    temperatures, mdp.py:155-162)."""
+    / tilt_temp)), (B,): e_z and e_tilt are the anchor height and tilt errors of the
+    env's termination terms for s_next (B, 71) against frame (B,), thresholds from
+    the env cfg (supermimic_vibed's temperatures, mdp.py:155-162)."""
     anchor_pos, anchor_quat = self._anchor_pose(s_next)
     motion = self._command.motion
     _, _, e_z, e_tilt = kernels.anchor_termination(
