@@ -108,7 +108,6 @@ class SuperMimicRunner:
       self.critic_cfg,
       device,
       compile=True,
-      action_noise_std=self.collection_cfg.action_noise_std,
       autocast=precision_cfg.autocast,
     )
 
@@ -251,6 +250,7 @@ class SuperMimicRunner:
       num_envs,
       self.interface.state_dim,
       self.interface.action_dim,
+      self.interface.context_dim,
       self.device,
     )
     self.obs = self.env.get_observations().to(self.device)
@@ -273,6 +273,8 @@ class SuperMimicRunner:
     for _ in range(num_steps):
       state = iface.state_from_sim()
       frame = iface.frame_from_sim()
+      # The step's context: env.step resamples it for the envs it resets.
+      context = iface.context_normalized()
       if iteration < self.policy_cfg.normalizer_freeze_iteration:
         self.alg.policy.update_normalizers(self.obs["actor"], self.obs["goal"])
       action = self.alg.act(self.obs["actor"], self.obs["goal"])
@@ -294,6 +296,7 @@ class SuperMimicRunner:
         state=state,
         action=action,
         frame=frame,
+        context=context,
         done=done,
         terminated=terminated,
         terminal_state=terminal,
@@ -305,19 +308,26 @@ class SuperMimicRunner:
       self.episode_frames[env_ids, step] = frame
       done_ids = torch.nonzero(done).squeeze(-1)
       if done_ids.numel() > 0:
-        self._finish_episodes(done_ids, truncated[done_ids], terminal[done_ids])
+        self._finish_episodes(
+          done_ids, truncated[done_ids], terminal[done_ids], context[done_ids]
+        )
       self.episode_step = torch.where(done, 0, self.episode_step + 1)
       self._log_stats["env_steps"] += 1
 
   def _finish_episodes(
-    self, env_ids: torch.Tensor, truncated: torch.Tensor, terminal: torch.Tensor
+    self,
+    env_ids: torch.Tensor,
+    truncated: torch.Tensor,
+    terminal: torch.Tensor,
+    context: torch.Tensor,
   ) -> None:
     """Credit the discounted returns of finished episodes to the reset sampler.
 
     The return-to-go G_t is computed backwards from the episode end, bootstrapped with
-    V(s_T) for truncated episodes (0 for terminated ones, and for all episodes before
-    the critic's first fit); ``ReturnSampler.credit_episodes`` gives every bin the
-    episode entered G at its first step in that bin.
+    V(s_T) in the episode's sim context (M, C) for truncated episodes (0 for
+    terminated ones, and for all episodes before the critic's first fit);
+    ``ReturnSampler.credit_episodes`` gives every bin the episode entered G at its
+    first step in that bin.
     """
     iface = self.interface
     gamma = self.policy_cfg.gamma
@@ -331,7 +341,7 @@ class SuperMimicRunner:
     last_frame = frames[rows, lengths - 1]
     next_frame = torch.minimum(last_frame + 1, iface.clip_end(last_frame) - 1)
     if self.alg.critic_fitted:
-      value = self.alg.value(terminal, next_frame, env_ids)
+      value = self.alg.value(terminal, next_frame, context)
     else:
       value = torch.zeros(env_ids.numel(), device=self.device)
     bootstrap = torch.where(truncated, value, 0.0).double()
@@ -403,6 +413,7 @@ class SuperMimicRunner:
       "Metrics/imagined_survival": means.get("imagined_survival"),
       "Metrics/policy_grad_norm": means.get("policy_grad_norm"),
       "Metrics/world_model_grad_norm": means.get("world_model_grad_norm"),
+      "Metrics/value_clip_fraction": means.get("value_clip_fraction"),
     }
     if stats["episodes"] > 0:
       length_sum = float(stats["episode_length_sum"])

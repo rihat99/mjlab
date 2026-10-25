@@ -94,31 +94,25 @@ class WorldModel(nn.Module):
     return self.state.integrate(s, y * self.nominal_scale)
 
   @torch.no_grad()
-  def fit_statistics(
-    self, buffer: ReplayBuffer, iface: ModelInterface, context: torch.Tensor
-  ) -> None:
+  def fit_statistics(self, buffer: ReplayBuffer, iface: ModelInterface) -> None:
     """Fit input statistics and nominal scales from every transition in the buffer
     (end of prefill); see :meth:`update_statistics`.
 
     Args:
-      buffer: the replay buffer.
+      buffer: the replay buffer (states, actions and sim contexts).
       iface: the task's model interface (invariant features).
-      context: (N, C) normalised sim context of every env.
     """
     for chunk in buffer.iter_transitions(_STATISTICS_CHUNK):
       s, s_next = chunk["state"], chunk["next_state"]
       inputs = self.dynamics_input(
-        iface.invariant_features(s), chunk["action"], context[chunk["env_idx"]]
+        iface.invariant_features(s), chunk["action"], chunk["context"]
       )
       self.update_statistics(inputs, self.state.delta(s, s_next))
     self.statistics_fitted.fill_(True)
 
   @torch.no_grad()
   def update_statistics_from_windows(
-    self,
-    batches: list[dict[str, torch.Tensor]],
-    iface: ModelInterface,
-    context: torch.Tensor,
+    self, batches: list[dict[str, torch.Tensor]], iface: ModelInterface
   ) -> None:
     """Running update of the statistics from the logged transitions of sampled windows
     (real data only, never imagined states).
@@ -130,7 +124,6 @@ class WorldModel(nn.Module):
     Args:
       batches: outputs of ``ReplayBuffer.sample_windows``.
       iface: the task's model interface (invariant features).
-      context: (N, C) normalised sim context of every env.
     """
 
     def cat(key: str) -> torch.Tensor:
@@ -144,7 +137,7 @@ class WorldModel(nn.Module):
       (iface.invariant_features(s0).unsqueeze(1), next_features[:, :-1]), dim=1
     )
     states = torch.cat((s0.unsqueeze(1), targets[:, :-1]), dim=1)
-    window_context = context[cat("env_idx")].unsqueeze(1).expand(-1, k, -1)
+    window_context = cat("context").unsqueeze(1).expand(-1, k, -1)
     inputs = self.dynamics_input(features, actions, window_context)[valid]
     increments = self.state.delta(states, targets)[valid]
     self.update_statistics(
@@ -203,7 +196,7 @@ def world_model_loss(
     model: the world model.
     iface: the task's model interface (invariant features).
     windows: output of ``ReplayBuffer.sample_windows``.
-    context: (B, C) normalised sim context of the window envs.
+    context: (B, C) normalised sim context of the windows (``windows["context"]``).
 
   Returns:
     state loss (), mean e^2 at the last window step ().

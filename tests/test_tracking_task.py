@@ -3,6 +3,7 @@
 import pytest
 
 from mjlab.asset_zoo.robots import G1_ACTION_SCALE
+from mjlab.asset_zoo.robots.unitree_g1.g1_constants import FULL_COLLISION
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.tasks.registry import list_tasks, load_env_cfg
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
@@ -33,20 +34,20 @@ def test_tracking_tasks_have_motion_command(tracking_task_ids: list[str]) -> Non
     )
 
 
-def test_tracking_tasks_have_self_collision_sensor(
-  tracking_task_ids: list[str],
-) -> None:
-  """Tracking tasks with robot self-collision should have a self_collision sensor."""
-  # SuperMimic turns robot self-collision off (ground contacts only), so no sensor.
-  for task_id in [t for t in tracking_task_ids if "SuperMimic" not in t]:
-    cfg = load_env_cfg(task_id)
+def test_g1_tracking_tasks_self_collision(g1_tracking_task_ids: list[str]) -> None:
+  """Every G1 tracking task simulates robot self-collision, in training and play.
 
-    assert cfg.scene.sensors is not None, f"Task {task_id} has no sensors"
-
-    sensor_names = {s.name for s in cfg.scene.sensors}
-    assert "self_collision" in sensor_names, (
-      f"Task {task_id} missing self_collision sensor"
-    )
+  The BeyondMimic tasks penalise it through the self_collision sensor; SuperMimic has
+  no penalty (paper App. A), so no sensor.
+  """
+  for task_id in g1_tracking_task_ids:
+    for play in (False, True):
+      cfg = load_env_cfg(task_id, play=play)
+      assert cfg.scene.entities["robot"].collisions == (FULL_COLLISION,), task_id
+      sensor_names = {s.name for s in cfg.scene.sensors or ()}
+      penalised = "self_collisions" in cfg.rewards
+      assert penalised == ("SuperMimic" not in task_id), task_id
+      assert ("self_collision" in sensor_names) == penalised, task_id
 
 
 def test_tracking_no_state_estimation_observations() -> None:

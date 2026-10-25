@@ -86,8 +86,8 @@ class CriticCfg:
 @dataclass
 class CollectionCfg:
   action_noise_std: float = 0.1
-  """Std of the Gaussian noise added to the policy action in the simulator and, the
-  same way, in imagination."""
+  """Std of the Gaussian noise added to the policy action in the simulator (it serves
+  the world-model fit; imagined actions are noise-free, paper Alg. A.1)."""
   replay_steps: int = 1000
   """Replay buffer capacity in steps per env."""
   sim_steps_per_iteration: float = 2.5

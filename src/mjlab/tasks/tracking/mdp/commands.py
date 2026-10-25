@@ -177,6 +177,7 @@ class MotionCommand(CommandTerm):
       g_max=cfg.g_max,
       return_alpha=cfg.bin_return_alpha,
       past_weight_alpha=cfg.past_weight_alpha,
+      softmax_cap=cfg.softmax_cap,
     )
 
     self.bin_failed_count = torch.zeros(
@@ -776,6 +777,9 @@ class MotionCommandCfg(CommandTermCfg):
   """Return sampling: EMA factor of the per-bin return estimates."""
   past_weight_alpha: float = 1e-4
   """Return sampling: EMA factor of the past softmax weights, per iteration."""
+  softmax_cap: float = 50.0
+  """Return sampling: largest softmax weight of a bin, as a multiple of the uniform
+  share 1 / Nb (allmimic's value); the excess goes to the other bins."""
   termination_z_temperature: float = 0.02
   """SuperMimic imagination: sigmoid temperature (m) of the soft anchor-height
   termination (``TrackingModelInterface.termination_soft``; supermimic_vibed's

@@ -32,7 +32,7 @@ from mjlab.rl.supermimic.config import (
 )
 from mjlab.rl.supermimic.interface import FloatingBaseState
 from mjlab.rl.supermimic.replay_buffer import ReplayBuffer
-from mjlab.rl.supermimic.return_sampler import ReturnSampler
+from mjlab.rl.supermimic.return_sampler import ReturnSampler, cap_probabilities
 from mjlab.rl.supermimic.runner import SuperMimicRunner, sim_steps_at
 from mjlab.rl.supermimic.world_model import world_model_loss
 from mjlab.rl.vecenv_wrapper import RslRlVecEnvWrapper
@@ -76,6 +76,11 @@ class _CountingSampler(ReturnSampler):
     super().update_past_weights()
 
 
+def _encoder_bias(context: torch.Tensor) -> torch.Tensor:
+  """Encoder bias (B, NQ) held by a synthetic context (B, CONTEXT_DIM)."""
+  return 0.01 * context[:, 1 : 1 + NQ]
+
+
 def _term_major(frames: torch.Tensor) -> torch.Tensor:
   """(N, history, obs) -> (N, history * obs) flattened like an mjlab history group."""
   terms = torch.split(frames, list(OBS_TERM_DIMS), dim=-1)
@@ -115,19 +120,19 @@ class _SyntheticInterface:
     return self.env.frame
 
   def context_normalized(self):
-    return self.env.context
+    return self.env.context.clone()
 
   def invariant_features(self, s):
     return self.layout.invariant_features(s)
 
-  def actor_observation(self, s, a_prev, env_idx, frame):
+  def actor_observation(self, s, a_prev, context, frame):
     del frame  # No term compares the state with the reference.
     _, quat, _, ang_vel, q, qd = self.layout.split(s)
     gravity = torch.zeros_like(ang_vel)
     gravity[:, 2] = -1.0
     return torch.cat(
       (
-        q + self.env.encoder_bias[env_idx],
+        q + _encoder_bias(context),
         qd,
         self.layout.to_root_frame(quat, ang_vel),
         self.layout.to_root_frame(quat, gravity),
@@ -226,6 +231,7 @@ class _SyntheticEnv:
       g_max=10.0,
       return_alpha=0.1,
       past_weight_alpha=1e-4,
+      softmax_cap=50.0,
     )
     t = torch.arange(start, dtype=torch.float32).unsqueeze(-1) * DT
     phase = torch.rand(1, NQ, generator=gen) * 6.28
@@ -242,10 +248,8 @@ class _SyntheticEnv:
     self.B = (0.1 * torch.randn(dim_u, NQ, generator=gen) / math.sqrt(NQ)).to(device)
     c_scale = 0.02 / math.sqrt(CONTEXT_DIM)
     self.C = (c_scale * torch.randn(dim_u, CONTEXT_DIM, generator=gen)).to(device)
-    self.context = (torch.rand(num_envs, CONTEXT_DIM, generator=gen) * 2 - 1).to(device)
-    self.encoder_bias = (0.02 * torch.rand(num_envs, NQ, generator=gen) - 0.01).to(
-      device
-    )
+    # Resampled per episode (in _reset); it holds the encoder bias (_encoder_bias).
+    self.context = torch.zeros(num_envs, CONTEXT_DIM, device=device)
 
     self.iface = _SyntheticInterface(self)
     self.state = torch.zeros(num_envs, STATE_DIM, device=device)
@@ -272,6 +276,7 @@ class _SyntheticEnv:
     delta[:, 12 + NQ :] = self.ref_qd[frame]
     self.state[env_ids] = self.layout.integrate(identity, delta)
     self.frame[env_ids] = frame
+    self.context[env_ids] = 2.0 * torch.rand(num, CONTEXT_DIM, device=self.device) - 1
     self.a_prev[env_ids] = 0.0
     self.episode_length_buf[env_ids] = 0
     obs = self._noisy_obs(env_ids)
@@ -279,7 +284,10 @@ class _SyntheticEnv:
 
   def _noisy_obs(self, env_ids: torch.Tensor) -> torch.Tensor:
     obs = self.iface.actor_observation(
-      self.state[env_ids], self.a_prev[env_ids], env_ids, self.frame[env_ids]
+      self.state[env_ids],
+      self.a_prev[env_ids],
+      self.context[env_ids],
+      self.frame[env_ids],
     )
     return self.iface.add_observation_noise(obs)
 
@@ -344,10 +352,10 @@ def _fill_buffer(
   env: _SyntheticEnv, steps: int, action_std: float = 0.3
 ) -> ReplayBuffer:
   """Collect ``steps`` random-action steps into a buffer, as the runner stores them."""
-  buffer = ReplayBuffer(steps + 1, env.num_envs, STATE_DIM, NQ, env.device)
+  buffer = ReplayBuffer(steps + 1, env.num_envs, STATE_DIM, NQ, CONTEXT_DIM, env.device)
   episode_step = torch.zeros(env.num_envs, dtype=torch.int32, device=env.device)
   for _ in range(steps):
-    state, frame = env.state.clone(), env.frame.clone()
+    state, frame, context = env.state.clone(), env.frame.clone(), env.context.clone()
     action = action_std * torch.randn(env.num_envs, NQ, device=env.device)
     _, _, dones, _ = env.step(action)
     done = dones.bool()
@@ -356,6 +364,7 @@ def _fill_buffer(
       state=state,
       action=action,
       frame=frame,
+      context=context,
       done=done,
       terminated=env.termination_manager.terminated,
       terminal_state=env.terminal_state,
@@ -397,8 +406,9 @@ def test_floating_base_delta_integrate_round_trip(device):
 def test_replay_buffer_windows_and_seeds_around_dones_and_wrap():
   # 9 steps into a 6-row ring: ages 0..5 hold global steps 3..8. Env 0 ends an episode
   # at step 4 (terminal state 100 + step); env 1 runs one long episode. State = (step,
-  # env), action = step, so every sampled row can be traced back.
-  buffer = ReplayBuffer(6, 2, state_dim=2, action_dim=1, device="cpu")
+  # env), action = step, context = (episode, env), so every sampled row can be traced
+  # back.
+  buffer = ReplayBuffer(6, 2, state_dim=2, action_dim=1, context_dim=2, device="cpu")
   episode_step = torch.zeros(2, dtype=torch.int32)
   for t in range(9):
     done = torch.tensor([t == 4, False])
@@ -406,6 +416,7 @@ def test_replay_buffer_windows_and_seeds_around_dones_and_wrap():
       state=torch.tensor([[t, 0.0], [t, 1.0]]),
       action=torch.full((2, 1), float(t)),
       frame=torch.full((2,), t),
+      context=torch.tensor([[float(t > 4), 0.0], [0.0, 1.0]]),
       done=done,
       terminated=done,
       terminal_state=torch.tensor([[100.0 + t, 0.0], [100.0 + t, 1.0]]),
@@ -424,6 +435,7 @@ def test_replay_buffer_windows_and_seeds_around_dones_and_wrap():
     starts.add((env, t))
     for m in range(2):
       assert windows["targets"][i, m].tolist() == next_state(t + m, env)
+    assert windows["context"][i].tolist() == [float(env == 0 and t > 4), env]
   assert windows["valid"].all()
   # Starts need rows t, t+1, t+2 stored and no done at row t.
   assert starts == {(0, 3), (0, 5), (0, 6), (1, 3), (1, 4), (1, 5), (1, 6)}
@@ -439,6 +451,7 @@ def test_replay_buffer_windows_and_seeds_around_dones_and_wrap():
     prev = [float(h - 1) if h > t - ep else 0.0 for h in hist]
     assert seeds["prev_action_hist"][i, :, 0].tolist() == prev
     assert seeds["a_prev"][i, 0] == prev[-1]
+    assert seeds["context"][i].tolist() == [float(env == 0 and t > 4), env]
   # Env 0 step 3 lacks its history (episode start overwritten), step 4 is a done; env 1
   # steps 3..5 lack the row before their 3-row history.
   assert starts == {(0, 5), (0, 6), (0, 7), (0, 8), (1, 6), (1, 7), (1, 8)}
@@ -456,7 +469,7 @@ def test_world_model_k_step_loss_decreases(device):
   buffer = _fill_buffer(env, 60)
   alg.fit_world_model_statistics(buffer)
   windows = buffer.sample_windows(1024, wm_cfg.window_k)
-  context = env.context[windows["env_idx"]]
+  context = windows["context"]
 
   def state_loss() -> float:
     with torch.no_grad():
@@ -569,9 +582,7 @@ def test_compiled_iteration_matches_eager(device):
   losses = {}
   for compile in (False, True):
     torch.manual_seed(1)  # Same initial weights and the same sampled batches.
-    alg = SuperMimic(
-      env.iface, wm_cfg, policy_cfg, critic_cfg, device, compile, action_noise_std=0.1
-    )
+    alg = SuperMimic(env.iface, wm_cfg, policy_cfg, critic_cfg, device, compile)
     alg.fit_world_model_statistics(buffer)
     # Two iterations: the second one's graphs must read the statistics updated in
     # place by the first.
@@ -594,9 +605,7 @@ def test_compiled_policy_gradient_matches_eager(device):
   grads = []
   for compile in (False, True):
     torch.manual_seed(1)  # Same weights, batches, seeds and noise.
-    alg = SuperMimic(
-      env.iface, wm_cfg, policy_cfg, critic_cfg, device, compile, action_noise_std=0.1
-    )
+    alg = SuperMimic(env.iface, wm_cfg, policy_cfg, critic_cfg, device, compile)
     alg.fit_world_model_statistics(buffer)
     alg.fit_world_model(buffer)
     alg.update_policy(buffer)
@@ -616,14 +625,62 @@ def test_lambda_returns_hand_computed_h3():
   r1 = r[1] + gamma * (1 - d[1]) * ((1 - lam) * v[2] + lam * r2)
   r0 = r[0] + gamma * (1 - d[0]) * ((1 - lam) * v[1] + lam * r1)
   expected = torch.tensor([[r0], [r1], [r2], [r3]], dtype=torch.float64)
-  out = lambda_returns(
-    torch.tensor(r, dtype=torch.float64).unsqueeze(-1),
-    torch.tensor(d, dtype=torch.float64).unsqueeze(-1),
-    torch.tensor(v, dtype=torch.float64).unsqueeze(-1),
-    gamma,
-    lam,
+
+  def returns(limit: float) -> torch.Tensor:
+    return lambda_returns(
+      torch.tensor(r, dtype=torch.float64).unsqueeze(-1),
+      torch.tensor(d, dtype=torch.float64).unsqueeze(-1),
+      torch.tensor(v, dtype=torch.float64).unsqueeze(-1),
+      gamma,
+      lam,
+      limit,
+    )
+
+  torch.testing.assert_close(returns(10.0), expected)
+  # Value clip: V_2, V_3 are clamped to 2.5, and so is every target above it.
+  c3 = 2.5
+  c2 = min(r[2] + gamma * (1 - d[2]) * ((1 - lam) * 2.5 + lam * c3), 2.5)
+  c1 = min(r[1] + gamma * (1 - d[1]) * ((1 - lam) * 2.5 + lam * c2), 2.5)
+  c0 = min(r[0] + gamma * (1 - d[0]) * ((1 - lam) * v[1] + lam * c1), 2.5)
+  clamped = torch.tensor([[c0], [c1], [c2], [c3]], dtype=torch.float64)
+  torch.testing.assert_close(returns(2.5), clamped)
+
+
+def test_softmax_cap(device):
+  # 1000 bins, one hard: the uncapped softmax puts ~1 on it, the cap 50 / 1000.
+  num_bins = 1000
+  starts = torch.arange(num_bins, device=device) * 10
+  sampler = ReturnSampler(
+    torch.arange(10 * num_bins, device=device) // 10,
+    starts,
+    starts + 10,
+    torch.full((num_bins,), 10 * num_bins, device=device),
+    g_max=10.0,
+    return_alpha=0.1,
+    past_weight_alpha=1e-4,
+    softmax_cap=50.0,
   )
-  torch.testing.assert_close(out, expected)
+  sampler.bin_returns[:] = 10.0
+  sampler.bin_returns[7] = 0.0
+  probs = sampler.probabilities()
+  cap = 50.0 / num_bins
+  expected_hard = 0.5 / num_bins + 0.4 * cap + 0.1 / num_bins
+  torch.testing.assert_close(probs[7], torch.tensor(expected_hard, device=device))
+  torch.testing.assert_close(probs.sum(), torch.tensor(1.0, device=device))
+  log = sampler.log()
+  assert log["top1_probability"] == pytest.approx(expected_hard, rel=1e-5)
+  assert log["top1_probability_uncapped"] > 0.39
+
+  # Water-filling: nothing above the cap, the rest scaled by one common factor.
+  logits = 3.0 * torch.randn(num_bins, generator=torch.Generator().manual_seed(0))
+  p = torch.softmax(logits, dim=0).to(device)
+  capped = cap_probabilities(p, cap)
+  assert float(capped.max()) <= cap * (1 + 1e-6)
+  torch.testing.assert_close(capped.sum(), torch.tensor(1.0, device=device))
+  free = capped < cap
+  assert int((~free).sum()) > 1
+  ratio = capped[free] / p[free]
+  torch.testing.assert_close(ratio, ratio[:1].expand_as(ratio))
 
 
 def test_runner_learn_save_load_and_inference(device, tmp_path):
@@ -661,6 +718,9 @@ def test_runner_learn_save_load_and_inference(device, tmp_path):
     "Loss/policy",
     "Loss/critic",
     "Train/normalized_return",
+    "Metrics/value_clip_fraction",
+    "Metrics/sampler_top1_probability",
+    "Metrics/sampler_top1_probability_uncapped",
   ):
     assert tag in header
 

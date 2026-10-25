@@ -26,8 +26,8 @@ from mjlab.tasks.tracking.supermimic import TrackingModelInterface
 from mjlab.tasks.tracking.supermimic.recorder import floating_base_state
 
 TASK_ID = "Mjlab-Tracking-Flat-Unitree-G1-SuperMimic"
-OBS_TERM_DIMS = (29, 29, 3, 3, 29, 6)
-OBS_DIM, GOAL_DIM = 99, 730
+OBS_TERM_DIMS = (29, 29, 3, 3, 29)
+OBS_DIM, GOAL_DIM = 93, 730
 NUM_ENVS = 8
 NUM_STEPS = 100
 # Envs started 3 frames before their clip end: motion_end fires on their third step.
@@ -62,7 +62,7 @@ class _PreResetQpos(RecorderTerm):
 
 
 def _newest_frame(actor: torch.Tensor, term_dims: tuple[int, ...]) -> torch.Tensor:
-  """Last history frame (N, 99) of a term-major flattened history (N, 10 * 99)."""
+  """Last history frame (N, 93) of a term-major flattened history (N, 10 * 93)."""
   history = actor.shape[-1] // sum(term_dims)
   parts = torch.split(actor, [history * d for d in term_dims], dim=-1)
   return torch.cat(
@@ -106,6 +106,7 @@ def rollout(tmp_path_factory: pytest.TempPathFactory):
     record = {
       "s": iface.state_from_sim(),
       "frame": iface.frame_from_sim(),
+      "context": iface.context_normalized(),
       "a_prev": env.action_manager.action.clone(),
       "target_pos": command.body_pos_relative_w.clone(),
       "target_quat": command.body_quat_relative_w.clone(),
@@ -125,6 +126,9 @@ def rollout(tmp_path_factory: pytest.TempPathFactory):
       "truncated": truncated.clone(),
       "s_post": s_post,
       "frame_post": iface.frame_from_sim(),
+      "context_post": iface.context_normalized(),
+      "robot_anchor_pos": command.robot_anchor_pos_w - env.scene.env_origins,
+      "robot_anchor_quat": command.robot_anchor_quat_w.clone(),
       "a_post": env.action_manager.action.clone(),
       "actor": cast(torch.Tensor, obs["actor"]).clone(),
       "goal": cast(torch.Tensor, obs["goal"]).clone(),
@@ -148,7 +152,7 @@ def test_dims_and_context(rollout) -> None:
   env, iface, _ = rollout
   assert (iface.state_dim, iface.obs_dim, iface.goal_dim) == (71, OBS_DIM, GOAL_DIM)
   assert (iface.context_dim, iface.feature_dim, iface.action_dim) == (33, 68, 29)
-  assert iface.critic_dim == 68 + GOAL_DIM + 33
+  assert iface.critic_dim == 68 + GOAL_DIM + 33 + 9
   assert iface.obs_term_dims == OBS_TERM_DIMS
   group_dims = env.observation_manager.group_obs_dim
   assert group_dims["actor"] == (10 * OBS_DIM,) and group_dims["goal"] == (GOAL_DIM,)
@@ -169,18 +173,60 @@ def test_dims_and_context(rollout) -> None:
 
 def test_observation_and_goal_match_env(rollout) -> None:
   _, iface, steps = rollout
-  env_idx = torch.arange(NUM_ENVS, device=steps[0]["s"].device)
   obs_err = goal_err = 0.0
   for step in steps:
     newest = _newest_frame(step["actor"], iface.obs_term_dims)
     obs = iface.actor_observation(
-      step["s_post"], step["a_post"], env_idx, step["frame_post"]
+      step["s_post"], step["a_post"], step["context_post"], step["frame_post"]
     )
     goal = iface.goal(step["s_post"], step["frame_post"])
     obs_err = max(obs_err, float((obs - newest).abs().max()))
     goal_err = max(goal_err, float((goal - step["goal"]).abs().max()))
   assert obs_err <= 1e-5
   assert goal_err <= 1e-5
+
+
+def test_context_resampled_per_episode(rollout) -> None:
+  """Friction and encoder bias change exactly at resets; the CoM offset is fixed."""
+  _, _, steps = rollout
+  resets = 0
+  for step in steps:
+    done = step["terminated"] | step["truncated"]
+    before, after = step["context"], step["context_post"]
+    episode_part = (before[:, :30] != after[:, :30]).any(-1)
+    assert torch.equal(episode_part, done)
+    assert torch.equal(before[:, 30:], after[:, 30:])
+    resets += int(done.sum())
+  assert resets >= 5
+
+
+def test_critic_root_pose_error_matches_env(rollout) -> None:
+  """The privileged critic input: the reference anchor of frame k_t - 1 in the robot
+  anchor frame, as the env's command computes it on the post-step state."""
+  env, iface, steps = rollout
+  command = cast(MotionCommand, env.command_manager.get_term("motion"))
+  anchor = command.motion_anchor_body_index
+  err = 0.0
+  for step in steps:
+    s, frame = step["s_post"], step["frame_post"]
+    x = iface.critic_input(
+      s,
+      frame,
+      iface.invariant_features(s),
+      iface.goal(s, frame),
+      step["context_post"],
+    )
+    current = command.current_frames(frame)
+    ref_quat = command.motion.body_quat_w[current, anchor].float()
+    pos_b, ori_b = kernels.pose_in_frame(
+      command.motion.body_pos_w[current, anchor],
+      ref_quat / ref_quat.norm(dim=-1, keepdim=True),
+      step["robot_anchor_pos"],
+      step["robot_anchor_quat"],
+    )
+    expected = torch.cat((pos_b, ori_b), dim=-1)
+    err = max(err, float((x[:, -9:] - expected).abs().max()))
+  assert err <= 1e-4
 
 
 def test_termination_matches_env(rollout, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -308,14 +354,16 @@ def test_gradients_are_finite(rollout) -> None:
   s_next = _stack(steps, "s_next").flatten(0, 1).requires_grad_(True)
   frames = _stack(steps, "frame").flatten()
   a, a_prev = _stack(steps, "a").flatten(0, 1), _stack(steps, "a_prev").flatten(0, 1)
-  env_idx = torch.arange(NUM_ENVS, device=s_next.device).repeat(NUM_STEPS)
+  context = _stack(steps, "context").flatten(0, 1)
   reward = iface.reward(s_next, a, a_prev, frames)
   next_frames = torch.minimum(frames + 1, iface.clip_end(frames) - 1)
   goal = iface.goal(s_next, next_frames)
   obs = iface.add_observation_noise(
-    iface.actor_observation(s_next, a_prev, env_idx, next_frames)
+    iface.actor_observation(s_next, a_prev, context, next_frames)
   )
-  (reward.sum() + goal.sum() + obs.sum()).backward()
+  features = iface.invariant_features(s_next)
+  critic_x = iface.critic_input(s_next, next_frames, features, goal, context)
+  (reward.sum() + goal.sum() + obs.sum() + critic_x.sum()).backward()
   grad = s_next.grad
   assert grad is not None and torch.isfinite(grad).all()
   # Every block of the state (pose, velocities, q, qd) reaches the reward.

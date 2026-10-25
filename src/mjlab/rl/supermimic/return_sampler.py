@@ -6,6 +6,26 @@ import math
 
 import torch
 
+# Water-filling rounds of ``cap_probabilities``: on softmax distributions over 5k to 1M
+# bins with up to 1 % of the bins capped, the cap holds exactly after 8.
+_CAP_ROUNDS = 8
+
+
+def cap_probabilities(probabilities: torch.Tensor, cap: float) -> torch.Tensor:
+  """Distribution (Nb,) with no entry above ``cap``: the excess of capped entries goes
+  to the others in proportion to their probability (water-filling, allmimic's
+  ``cap_probs`` with capped entries kept out of the redistribution); no host sync.
+  Needs ``cap * Nb >= 1``."""
+  p = probabilities
+  for _ in range(_CAP_ROUNDS):
+    over = p >= cap
+    excess = (p - cap).clamp_min(0.0).sum()
+    under = torch.where(over, torch.zeros_like(p), p)
+    p = torch.where(
+      over, torch.full_like(p, cap), p + excess * under / under.sum().clamp_min(1e-30)
+    )
+  return p
+
 
 class ReturnSampler:
   """Reset distribution over bins, weighted towards bins of low observed return.
@@ -18,9 +38,11 @@ class ReturnSampler:
 
     p = 0.5 uniform + 0.4 softmax(-25 G_b / G_max) + 0.1 past weights
 
-  (:meth:`probabilities`) and a frame uniformly inside it, never a clip's last frame
-  (:meth:`sample_frames`, called by the env's command term). The state tensors are
-  updated in place.
+  with each bin's softmax weight capped at ``softmax_cap`` times the uniform share
+  (:func:`cap_probabilities`; the past weights average the capped softmax), so the
+  hard-bin mass spreads over at least Nb / softmax_cap bins (:meth:`probabilities`),
+  and a frame uniformly inside it, never a clip's last frame (:meth:`sample_frames`,
+  called by the env's command term). The state tensors are updated in place.
   """
 
   def __init__(
@@ -32,6 +54,7 @@ class ReturnSampler:
     g_max: float,
     return_alpha: float,
     past_weight_alpha: float,
+    softmax_cap: float,
   ) -> None:
     """Args:
     bin_of_frame: (F,) int64 bin of every library frame.
@@ -40,6 +63,7 @@ class ReturnSampler:
     g_max: largest attainable discounted return (scales the softmax).
     return_alpha: EMA factor of the bin return estimates.
     past_weight_alpha: EMA factor of the past softmax weights, per iteration.
+    softmax_cap: largest softmax weight of a bin, as a multiple of 1 / Nb (>= 1).
     """
     self.bin_of_frame = bin_of_frame
     self.bin_start = bin_start
@@ -50,6 +74,9 @@ class ReturnSampler:
     self.g_max = g_max
     self.return_alpha = return_alpha
     self.past_weight_alpha = past_weight_alpha
+    if softmax_cap < 1.0:
+      raise ValueError(f"softmax_cap {softmax_cap} < 1 leaves no valid distribution.")
+    self._bin_cap = softmax_cap / self.bin_count
     device = bin_start.device
     self.bin_returns = torch.zeros(self.bin_count, device=device)
     self.bin_past_weights = torch.full(
@@ -111,6 +138,9 @@ class ReturnSampler:
     self.bin_past_weights.lerp_(self._softmax(), self.past_weight_alpha)
 
   def _softmax(self) -> torch.Tensor:
+    return cap_probabilities(self._uncapped_softmax(), self._bin_cap)
+
+  def _uncapped_softmax(self) -> torch.Tensor:
     return torch.softmax(-25.0 * self.bin_returns / self.g_max, dim=0)
 
   def state_dict(self) -> dict[str, torch.Tensor]:
@@ -126,11 +156,17 @@ class ReturnSampler:
     self.bin_past_weights.copy_(state["bin_past_weights"])
 
   def log(self) -> dict[str, float]:
-    """Normalised entropy of the reset distribution and mean bin return."""
+    """Normalised entropy of the reset distribution, mean bin return, and the largest
+    bin probability with and without the softmax cap."""
     probs = self.probabilities()
     entropy = -(probs * probs.clamp_min(1e-12).log()).sum()
     count = probs.numel()
+    uncapped = (
+      0.5 / count + 0.4 * self._uncapped_softmax() + 0.1 * self.bin_past_weights
+    )
     return {
       "reset_entropy": float(entropy) / math.log(count) if count > 1 else 1.0,
       "mean_bin_return": float(self.bin_returns.mean()),
+      "top1_probability": float(probs.max()),
+      "top1_probability_uncapped": float(uncapped.max()),
     }

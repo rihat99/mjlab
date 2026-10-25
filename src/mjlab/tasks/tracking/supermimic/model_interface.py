@@ -31,7 +31,7 @@ from mjlab.tasks.tracking.supermimic.recorder import (
   TerminalStateRecorder,
   floating_base_state,
 )
-from mjlab.utils.lab_api.math import quat_apply_inverse
+from mjlab.utils.lab_api.math import normalize, quat_apply_inverse
 from mjlab.utils.noise.noise_cfg import NoiseCfg
 
 if TYPE_CHECKING:
@@ -41,16 +41,17 @@ if TYPE_CHECKING:
 _COMMAND = "motion"
 _ACTOR = "actor"
 _GOAL = "goal"
-# Actor terms the observation head reproduces, in env order (Table A.1, plus
-# Uni-SuperMimic's orientation error to the current reference frame).
+# Actor terms the observation head reproduces, in env order (Table A.1).
 _ACTOR_FUNCS = (
   mdp.joint_pos_rel,
   mdp.joint_vel_rel,
   mdp.builtin_sensor,
   mdp.projected_gravity,
   mdp.last_action,
-  mdp.motion_current_anchor_ori_b,
 )
+# Privileged critic input: the reference anchor pose in the robot anchor frame,
+# position (3) and orientation 6D (6).
+_ROOT_ERROR_DIM = 9
 _TRACKING_REWARDS = (
   mdp.motion_global_anchor_position_error_exp,
   mdp.motion_global_anchor_orientation_error_exp,
@@ -116,8 +117,10 @@ class TrackingModelInterface:
     self._init_goal()
     self._init_reward()
     self._init_termination()
-    self._context = self._read_context()
-    self.critic_dim = self.feature_dim + self.goal_dim + self.context_dim
+    self._init_context()
+    self.critic_dim = (
+      self.feature_dim + self.goal_dim + self.context_dim + _ROOT_ERROR_DIM
+    )
     self.return_sampler = command.return_sampler
 
     recorders = [
@@ -137,7 +140,7 @@ class TrackingModelInterface:
     if tuple(cfg.func for cfg in cfgs) != _ACTOR_FUNCS:
       raise ValueError(
         f"Actor terms {names} are not [joint_pos_rel, joint_vel_rel, builtin_sensor "
-        "(gyro), projected_gravity, last_action, motion_current_anchor_ori_b]."
+        "(gyro), projected_gravity, last_action]."
       )
     if not cfgs[0].params.get("biased", False):
       raise ValueError("The joint_pos actor term must use biased=True.")
@@ -158,11 +161,16 @@ class TrackingModelInterface:
       for dims, cfg in zip(term_dims, cfgs, strict=True)
     )
     self.obs_dim = sum(self.obs_term_dims)
-    expected = (self.nq, self.nq, 3, 3, self.action_dim, 6)
+    expected = (self.nq, self.nq, 3, 3, self.action_dim)
     if self.obs_term_dims != expected:
       raise ValueError(f"Actor term dims {self.obs_term_dims} != {expected}.")
-    if torch.any(self._robot.data.default_joint_vel != 0.0):
+    data = self._robot.data
+    if torch.any(data.default_joint_vel != 0.0):
       raise ValueError("joint_vel_rel with nonzero default joint velocities.")
+    default_q = data.default_joint_pos
+    if not torch.equal(default_q, default_q[:1].expand_as(default_q)):
+      raise ValueError("Default joint positions differ across envs.")
+    self._default_q = default_q[0]  # (nq,)
 
   def _check_gyro(self, sensor_name: str) -> None:
     """The gyro must sit on the root body with the root's orientation, so that it
@@ -229,19 +237,23 @@ class TrackingModelInterface:
     self._z_temperature = self._command.cfg.termination_z_temperature
     self._tilt_temperature = self._command.cfg.termination_tilt_temperature
 
-  def _read_context(self) -> torch.Tensor | None:
-    """Normalised startup-DR context (N, 33), or None if the cfg has no such DR.
+  def _init_context(self) -> None:
+    """The DR terms that make up the sim context xi (paper Table A.3), from the cfg.
 
     xi = [(mu - c) / h, encoder bias / h (nq), torso CoM offset / h (3)], with c, h
     the centre and half-width of each DR range of the env cfg (paper: (mu - 0.75) /
-    0.45, bias / 0.01, offset / (0.025, 0.05, 0.05)). The play cfg has no
-    randomization (fixed friction, no bias, no CoM offset): no context then.
+    0.45, bias / 0.01, offset / (0.025, 0.05, 0.05)). The terms may run at startup or
+    at reset (per episode). The play cfg has no randomization (fixed friction, no
+    bias, no CoM offset): no context then.
     """
     env = self._env
     events = env.event_manager
-    startup = events.active_terms.get("startup", [])
-    if not {"foot_friction", "encoder_bias", "base_com"} <= set(startup):
-      return None
+    self._has_context = False
+    names = {
+      n for mode in ("startup", "reset") for n in events.active_terms.get(mode, [])
+    }
+    if not {"foot_friction", "encoder_bias", "base_com"} <= names:
+      return
     indexing = self._robot.indexing
 
     friction_cfg = events.get_term_cfg("foot_friction")
@@ -249,15 +261,15 @@ class TrackingModelInterface:
       raise ValueError("foot_friction must set an absolute friction.")
     low, high = friction_cfg.params["ranges"]
     if high <= low:
-      return None
-    geom = int(indexing.geom_ids[friction_cfg.params["asset_cfg"].geom_ids][0])
+      return
     # shared_random: every foot geom carries the same sampled friction.
-    friction = env.sim.model.geom_friction[:, geom, 0]
-    friction = (friction - 0.5 * (low + high)) / (0.5 * (high - low))
+    self._friction_geom = int(
+      indexing.geom_ids[friction_cfg.params["asset_cfg"].geom_ids][0]
+    )
+    self._friction_range = (0.5 * (low + high), 0.5 * (high - low))
 
     bias_low, bias_high = events.get_term_cfg("encoder_bias").params["bias_range"]
-    bias = self._robot.data.encoder_bias
-    bias = (bias - 0.5 * (bias_low + bias_high)) / (0.5 * (bias_high - bias_low))
+    self._bias_range = (0.5 * (bias_low + bias_high), 0.5 * (bias_high - bias_low))
 
     com_cfg = events.get_term_cfg("base_com")
     if com_cfg.params["operation"] != "add":
@@ -265,14 +277,13 @@ class TrackingModelInterface:
     bodies = indexing.body_ids[com_cfg.params["asset_cfg"].body_ids]
     if bodies.numel() != 1:
       raise ValueError("base_com must randomize exactly one body (the torso).")
-    body = int(bodies[0])
-    default_ipos = env.sim.get_default_field("body_ipos")[body]
-    offset = env.sim.model.body_ipos[:, body] - default_ipos
+    self._com_body = int(bodies[0])
+    self._default_com = env.sim.get_default_field("body_ipos")[self._com_body]
     ranges = torch.tensor(
       [com_cfg.params["ranges"][axis] for axis in range(3)], device=self.device
     )
-    offset = (offset - ranges.mean(-1)) / (0.5 * (ranges[:, 1] - ranges[:, 0]))
-    return torch.cat([friction.unsqueeze(-1), bias, offset], dim=-1).float()
+    self._com_range = (ranges.mean(-1), 0.5 * (ranges[:, 1] - ranges[:, 0]))
+    self._has_context = True
 
   # Sim access.
 
@@ -290,13 +301,24 @@ class TrackingModelInterface:
     return self._command.time_steps.clone()
 
   def context_normalized(self) -> torch.Tensor:
-    """Normalised sim context (N, 33), fixed per env (see ``_read_context``)."""
-    if self._context is None:
+    """Normalised sim context (N, 33) of every env's current episode, read from the
+    live model fields and encoder biases (see ``_init_context``)."""
+    if not self._has_context:
       raise RuntimeError(
-        "No sim context: the env cfg lacks the startup DR events foot_friction, "
+        "No sim context: the env cfg lacks the DR events foot_friction, "
         "encoder_bias and base_com (e.g. the play cfg)."
       )
-    return self._context
+    env = self._env
+    friction = env.sim.model.geom_friction[:, self._friction_geom, 0]
+    offset = env.sim.model.body_ipos[:, self._com_body] - self._default_com
+    parts = (
+      (friction.unsqueeze(-1), self._friction_range),
+      (self._robot.data.encoder_bias, self._bias_range),
+      (offset, self._com_range),
+    )
+    return torch.cat(
+      [(value - center) / half for value, (center, half) in parts], dim=-1
+    ).float()
 
   # Heads on (imagined) states.
 
@@ -308,35 +330,30 @@ class TrackingModelInterface:
     self,
     s: torch.Tensor,
     a_prev: torch.Tensor,
-    env_idx: torch.Tensor,
+    context: torch.Tensor,
     frame: torch.Tensor,
   ) -> torch.Tensor:
-    """(grad) Noise-free actor frame (B, 99) of state s (B, 71) shown with frame
-    (B,).
-
+    """(grad) Noise-free actor frame (B, 93) of state s (B, 71), Table A.1:
     [q + encoder bias - default q, qd, gyro (root-frame angular velocity), projected
-    gravity, a_prev, the reference anchor orientation of frame - 1 in the robot
-    anchor frame (6D, ``mdp.motion_current_anchor_ori_b``)]; ``env_idx`` (B,) selects
-    the encoder bias and default q.
+    gravity, a_prev]. The encoder bias comes from the episode's context (B, 33); no
+    term compares the state with the reference, so ``frame`` is unused.
     """
+    del frame
     _, quat, _, ang_vel_w, q, qd = self._state.split(s)
-    data = self._robot.data
-    obs = kernels.proprio_observation(
+    center, half = self._bias_range
+    bias = center + half * context[:, 1 : 1 + self.nq]
+    return kernels.proprio_observation(
       q,
       qd,
       quat,
       quat_apply_inverse(quat, ang_vel_w),
-      data.encoder_bias[env_idx],
-      data.default_joint_pos[env_idx],
+      bias,
+      self._default_q,
       a_prev,
     )
-    _, anchor_quat = self._anchor_pose(s)
-    current = self._command.current_frames(frame)
-    ref_quat = self._command.motion.body_quat_w[current, self._anchor].float()
-    return torch.cat([obs, kernels.relative_rotation_6d(anchor_quat, ref_quat)], -1)
 
   def add_observation_noise(self, o: torch.Tensor) -> torch.Tensor:
-    """Observation (B, 99) plus fresh additive noise of each actor term's NoiseCfg
+    """Observation (B, 93) plus fresh additive noise of each actor term's NoiseCfg
     (none when the env disables corruption); the gradient of ``o`` is kept."""
     parts = torch.split(o, list(self.obs_term_dims), dim=-1)
     noisy = [
@@ -364,11 +381,26 @@ class TrackingModelInterface:
     goal: torch.Tensor,
     context: torch.Tensor,
   ) -> torch.Tensor:
-    """(grad) Critic input (B, 831) = [features (B, 68), goal (B, 730), context
-    (B, 33)] of state s (B, 71) at frame (B,); features and goal are
-    ``invariant_features(s)`` and ``goal(s, frame)``."""
-    del s, frame
-    return torch.cat((features, goal, context), dim=-1)
+    """(grad) Critic input (B, 840) = [features (B, 68), goal (B, 730), context
+    (B, 33), root pose error (B, 9)] of state s (B, 71) at frame (B,); features and
+    goal are ``invariant_features(s)`` and ``goal(s, frame)``.
+
+    The root pose error, privileged (the actor does not see it), is the reference
+    anchor of the frame s is aligned with (``MotionCommand.current_frames(frame)``)
+    in the robot anchor frame: position (3) and orientation 6D (6), BeyondMimic's
+    critic terms ``motion_anchor_pos_b`` / ``motion_anchor_ori_b``. It carries the xy
+    and yaw error the root rewards depend on, which features and goal lack.
+    """
+    anchor_pos, anchor_quat = self._anchor_pose(s)
+    current = self._command.current_frames(frame)
+    motion = self._command.motion
+    pos_b, ori_b = kernels.pose_in_frame(
+      motion.body_pos_w[current, self._anchor],
+      normalize(motion.body_quat_w[current, self._anchor].float()),
+      anchor_pos,
+      anchor_quat,
+    )
+    return torch.cat((features, goal, context, pos_b, ori_b), dim=-1)
 
   def reward_terms(
     self,

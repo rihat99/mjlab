@@ -39,23 +39,29 @@ def lambda_returns(
   values: torch.Tensor,
   gamma: float,
   lam: float,
+  limit: float,
 ) -> torch.Tensor:
   """Lambda-return critic targets (paper Eq. 3), computed backwards.
 
-  R_t = r_{t+1} + gamma (1 - d_{t+1}) ((1 - lam) V_{t+1} + lam R_{t+1}),  R_H = V_H.
+  R_t = r_{t+1} + gamma (1 - d_{t+1}) ((1 - lam) V_{t+1} + lam R_{t+1}),  R_H = V_H,
+
+  with every V_t and R_t clamped to [-limit, limit].
 
   Args:
     rewards: (H, B) r_{t+1} for t = 0..H-1.
     terminations: (H, B) termination probabilities d_{t+1}.
     values: (H + 1, B) V_0..V_H.
+    limit: largest attainable absolute return.
 
   Returns:
     (H + 1, B) targets R_0..R_H.
   """
+  values = values.clamp(-limit, limit)
   returns = [values[-1]]
   for t in range(rewards.shape[0] - 1, -1, -1):
     blend = (1.0 - lam) * values[t + 1] + lam * returns[-1]
-    returns.append(rewards[t] + gamma * (1.0 - terminations[t]) * blend)
+    target = rewards[t] + gamma * (1.0 - terminations[t]) * blend
+    returns.append(target.clamp(-limit, limit))
   return torch.stack(returns[::-1])
 
 
@@ -93,21 +99,22 @@ class SuperMimic:
     critic_cfg: CriticCfg,
     device: str | torch.device,
     compile: bool = False,
-    action_noise_std: float = 0.0,
     autocast: bool = False,
   ) -> None:
     """``compile`` builds compiled twins of the hot paths (training always compiles;
-    the eager build is the reference the tests compare it with). ``action_noise_std``
-    is the simulator's action noise (the runner passes
-    ``CollectionCfg.action_noise_std``); imagination adds it to the policy action.
-    ``autocast`` runs the world-model loss, the imagined steps and the policy objective
-    under bfloat16 autocast (see ``PrecisionCfg.autocast``)."""
+    the eager build is the reference the tests compare it with). ``autocast`` runs the
+    world-model loss, the imagined steps and the policy objective under bfloat16
+    autocast (see ``PrecisionCfg.autocast``)."""
     self.iface = iface
     self.world_model_cfg = world_model_cfg
     self.policy_cfg = policy_cfg
     self.critic_cfg = critic_cfg
     self.device = torch.device(device)
-    self.action_noise_std = action_noise_std
+    # The largest attainable |return|, max_step_reward / (1 - gamma) (10 for tracking):
+    # critic values are clamped to it wherever they serve as an estimate (lambda-return
+    # targets, the policy's and the reset sampler's bootstraps); the regression fits
+    # the raw output. Unclamped, V drifted above it at clip ends and diverged.
+    self.value_limit = iface.max_step_reward / (1.0 - policy_cfg.gamma)
     self.state = FloatingBaseState(iface.nq)
     assert self.state.state_dim == iface.state_dim
     assert self.state.feature_dim == iface.feature_dim
@@ -154,6 +161,7 @@ class SuperMimic:
     )
     self._reward = _maybe_compile(iface.reward, compile)
     self._termination = _maybe_compile(iface.termination_soft, compile)
+    self._critic_input = _maybe_compile(iface.critic_input, compile)
     self._critic_loss = _maybe_compile(self.critic.loss, compile, graphs)
 
   def set_learning_rate_scale(self, scale: float) -> None:
@@ -174,12 +182,13 @@ class SuperMimic:
 
   @torch.no_grad()
   def value(
-    self, s: torch.Tensor, frame: torch.Tensor, env_idx: torch.Tensor
+    self, s: torch.Tensor, frame: torch.Tensor, context: torch.Tensor
   ) -> torch.Tensor:
-    """V (M,) of states s (M, S) whose next observation targets ``frame`` (M,)."""
+    """V (M,) of states s (M, S) whose next observation targets ``frame`` (M,), in sim
+    context (M, C), clamped to +-``value_limit``."""
     features, goal = self._state_heads(s, frame)
-    context = self.iface.context_normalized()[env_idx]
-    return self.critic(self.iface.critic_input(s, frame, features, goal, context))
+    x = self._critic_input(s, frame, features, goal, context)
+    return self.critic(x).clamp(-self.value_limit, self.value_limit)
 
   # World model.
 
@@ -187,14 +196,13 @@ class SuperMimic:
   def fit_world_model_statistics(self, buffer: ReplayBuffer) -> None:
     """Fit the world model's input statistics and nominal scales (end of prefill) from
     every transition in the buffer."""
-    self.world_model.fit_statistics(buffer, self.iface, self.iface.context_normalized())
+    self.world_model.fit_statistics(buffer, self.iface)
 
   def fit_world_model(self, buffer: ReplayBuffer) -> dict[str, torch.Tensor]:
     """``batches_per_update`` Adam steps of the k-step loss, after a statistics update
     from the sampled windows; returns mean metrics (loss, last-step error, pre-clip
     gradient norm)."""
     cfg = self.world_model_cfg
-    context_all = self.iface.context_normalized()
     sums = torch.zeros(3, device=self.device)
     # Sampling syncs with the host; drawing every batch up front (same random stream,
     # nothing else draws in between) keeps those syncs out of the update loop.
@@ -202,10 +210,10 @@ class SuperMimic:
       buffer.sample_windows(cfg.batch_size, cfg.window_k)
       for _ in range(cfg.batches_per_update)
     ]
-    self.world_model.update_statistics_from_windows(batches, self.iface, context_all)
+    self.world_model.update_statistics_from_windows(batches, self.iface)
     for windows in batches:
       loss, last_error = self._world_model_loss(
-        self.world_model, self.iface, windows, context_all[windows["env_idx"]]
+        self.world_model, self.iface, windows, windows["context"]
       )
       self.world_model_optimizer.zero_grad(set_to_none=True)
       loss.backward()
@@ -236,9 +244,7 @@ class SuperMimic:
     s: torch.Tensor,
     features: torch.Tensor,
     context: torch.Tensor,
-    env_idx: torch.Tensor,
     next_frame: torch.Tensor,
-    action_noise: torch.Tensor,
   ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """One imagined step without its observation noise (the caller adds it).
 
@@ -246,18 +252,16 @@ class SuperMimic:
       frames: (B, history, obs_dim) noisy observation frames, oldest first.
       goal: (B, G) goal of ``s``.
       s: (B, S) state; features: (B, F) its invariant features.
-      context: (B, C) normalised sim context; env_idx: (B,) env of each row.
+      context: (B, C) normalised sim context of each row's episode.
       next_frame: (B,) frame the next observation targets.
-      action_noise: (B, A) noise added to the policy action, drawn by the caller
-        outside the compiled step.
 
     Returns:
-      executed action a + noise (B, A), s_next (B, S), noise-free observation of s_next
-      (B, obs_dim), features (B, F) and goal (B, G) of s_next.
+      action a (B, A) (noise-free, paper Alg. A.1), s_next (B, S), noise-free
+      observation of s_next (B, obs_dim), features (B, F) and goal (B, G) of s_next.
     """
-    action = self.policy.forward_frames(frames, goal) + action_noise
+    action = self.policy.forward_frames(frames, goal)
     s_next = self.world_model.step(s, features, action, context)
-    obs = self.iface.actor_observation(s_next, action, env_idx, next_frame)
+    obs = self.iface.actor_observation(s_next, action, context, next_frame)
     next_features, next_goal = self.state_heads(s_next, next_frame)
     return action, s_next, obs, next_features, next_goal
 
@@ -302,10 +306,10 @@ class SuperMimic:
     discount = cfg.gamma ** torch.arange(horizon, device=reward.device).unsqueeze(-1)
     weighted_reward = survival * reward
     terminal_value = self.critic(
-      self.iface.critic_input(
+      self._critic_input(
         states[-1], last_frame, feature_list[-1], goal_list[-1], context
       )
-    )
+    ).clamp(-self.value_limit, self.value_limit)
     objective = (discount * weighted_reward).sum(dim=0)
     objective = objective + cfg.gamma**horizon * survival_next[-1] * terminal_value
     loss = -objective.mean()
@@ -325,7 +329,8 @@ class SuperMimic:
     """One BPTT step of the policy on imagined rollouts from replay states (Eq. 2).
 
     J = sum_t gamma^t c_t r_{t+1} + gamma^H c_H V(s_H, g_H, xi),
-    c_0 = 1,  c_{t+1} = c_t (1 - d_{t+1}).
+    c_0 = 1,  c_{t+1} = c_t (1 - d_{t+1}), V clamped to +-``value_limit``; xi is the
+    seed's recorded sim context and the imagined actions carry no noise.
     The world model and critic are frozen (requires_grad False) but gradients flow
     through their inputs. Gradients are clipped by global norm, then element-wise.
     Returns metrics and the detached rollout.
@@ -338,16 +343,15 @@ class SuperMimic:
       cfg.horizon + cfg.seed_end_margin,
       iface.clip_end,
     )
-    env_idx = seeds["env_idx"]
-    num = env_idx.shape[0]
-    context = iface.context_normalized()[env_idx]
+    context = seeds["context"]
+    num = context.shape[0]
     with torch.no_grad():
       hist_states = seeds["state_hist"].flatten(0, 1)
       hist_actions = seeds["prev_action_hist"].flatten(0, 1)
-      hist_env = env_idx.repeat_interleave(cfg.history_length)
+      hist_context = context.repeat_interleave(cfg.history_length, dim=0)
       hist_frames = seeds["frame_hist"].flatten()
       frames = iface.add_observation_noise(
-        iface.actor_observation(hist_states, hist_actions, hist_env, hist_frames)
+        iface.actor_observation(hist_states, hist_actions, hist_context, hist_frames)
       ).view(num, cfg.history_length, iface.obs_dim)
 
     frozen = (self.world_model, self.critic)
@@ -358,21 +362,13 @@ class SuperMimic:
     frame = seeds["frame0"]
     a_prev = seeds["a_prev"]
     features, goal = self._state_heads(s, frame)
-    # The executed action a + noise drives the world model, the next observation and
-    # the action-rate reward, as in the simulator (whose action_rate_l2 and last_action
-    # read the executed action); the noise is drawn eagerly, like the observation noise.
-    noise_std = self.action_noise_std
-    no_noise = torch.zeros(num, iface.action_dim, device=self.device)
     # Index t of these lists is step t of the rollout (s_t -> s_{t+1}); features and
     # goals also hold the start state, so they have horizon + 1 entries.
     states, actions, prev_actions, reward_frames = [], [], [], []
     feature_list, goal_list = [features], [goal]
     for _ in range(cfg.horizon):
-      action_noise = (
-        noise_std * torch.randn_like(no_noise) if noise_std > 0.0 else no_noise
-      )
       action, s_next, obs, features, goal = self._imagine_step(
-        frames, goal, s, features, context, env_idx, frame + 1, action_noise
+        frames, goal, s, features, context, frame + 1
       )
       obs = iface.add_observation_noise(obs)
       frames = torch.cat((frames[:, 1:], obs.unsqueeze(1)), dim=1)
@@ -435,7 +431,8 @@ class SuperMimic:
   def fit_critic(self, rollout: ImaginedRollout) -> dict[str, torch.Tensor]:
     """Fit V to lambda-return targets of the imagined rollout (Eq. 3).
 
-    Targets are computed once with the pre-update critic. The fit runs ``epochs`` x
+    Targets are computed once with the pre-update critic, its values clamped to
+    +-``value_limit`` (the regression output is not). The fit runs ``epochs`` x
     ``minibatches`` Adam steps over the H x B states s_0..s_{H-1}; V(s_H) enters only
     through the targets. The input normaliser is updated on all H + 1 states, since V
     is also evaluated at s_H.
@@ -443,7 +440,7 @@ class SuperMimic:
     cfg = self.critic_cfg
     steps = rollout.features.shape[0]
     context = rollout.context.unsqueeze(0).expand(steps, -1, -1)
-    x = self.iface.critic_input(
+    x = self._critic_input(
       rollout.states.flatten(0, 1),
       rollout.frames.flatten(),
       rollout.features.flatten(0, 1),
@@ -455,8 +452,14 @@ class SuperMimic:
     x = self.critic.normalize(x)
     with torch.no_grad():
       values = self.critic.normalized_value(x).view(steps, -1)
+      clipped = (values.abs() > self.value_limit).float().mean()
       targets = lambda_returns(
-        rollout.rewards, rollout.terminations, values, self.policy_cfg.gamma, cfg.lam
+        rollout.rewards,
+        rollout.terminations,
+        values,
+        self.policy_cfg.gamma,
+        cfg.lam,
+        self.value_limit,
       )
     # Paper Eq. 3 sums t < H: the last state's target would be its own value.
     x = x.view(steps, -1, x.shape[-1])[:-1].flatten(0, 1)
@@ -475,7 +478,10 @@ class SuperMimic:
         self.critic_optimizer.step()
         loss_sum += loss.detach()
     self.critic_fitted = True
-    return {"critic": loss_sum / (cfg.epochs * cfg.minibatches)}
+    return {
+      "critic": loss_sum / (cfg.epochs * cfg.minibatches),
+      "value_clip_fraction": clipped,
+    }
 
   # Checkpoints.
 

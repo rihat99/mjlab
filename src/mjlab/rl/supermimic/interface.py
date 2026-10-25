@@ -82,7 +82,9 @@ class ModelInterface(Protocol):
     ...
 
   def context_normalized(self) -> torch.Tensor:
-    """Normalised per-env sim context xi, (N, context_dim); fixed per env."""
+    """Normalised sim context xi of every env's current episode, (N, context_dim), a
+    new tensor. Constant within an episode; the env may resample it at reset, so the
+    runner stores it with every transition."""
     ...
 
   def invariant_features(self, s: torch.Tensor) -> torch.Tensor:
@@ -93,7 +95,7 @@ class ModelInterface(Protocol):
     self,
     s: torch.Tensor,
     a_prev: torch.Tensor,
-    env_idx: torch.Tensor,
+    context: torch.Tensor,
     frame: torch.Tensor,
   ) -> torch.Tensor:
     """(grad) Noise-free actor observation frame, as the env's actor group shows it.
@@ -102,8 +104,8 @@ class ModelInterface(Protocol):
       s: (B, state_dim) state.
       a_prev: (B, action_dim) action executed before reaching ``s`` (zeros at episode
         start).
-      env_idx: (B,) int64 env of each row (selects per-env constants such as encoder
-        bias).
+      context: (B, context_dim) normalised sim context of each row's episode (holds
+        episode constants such as the encoder bias).
       frame: (B,) int64 frame k_t the observation targets (terms that compare ``s``
         with the reference use it; the state is aligned with k_t - 1).
 
