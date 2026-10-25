@@ -1,9 +1,9 @@
 """Contract between a task and the SuperMimic learner, plus floating-base state helpers.
 
 The learner never touches the simulator state directly: everything it needs from the
-task (state read-out, analytic observation / goal / reward heads on imagined states,
-reset-sampler bookkeeping) goes through a :class:`ModelInterface`. The runner builds the
-interface as ``cls(env.unwrapped)`` from the class named in
+task (state read-out, analytic observation / goal / reward heads and the critic input
+on imagined states, the env's reset sampler) goes through a :class:`ModelInterface`.
+The runner builds the interface as ``cls(env.unwrapped)`` from the class named in
 ``SuperMimicRunnerCfg.model_interface``.
 """
 
@@ -13,6 +13,7 @@ from typing import Protocol
 
 import torch
 
+from mjlab.rl.supermimic.return_sampler import ReturnSampler
 from mjlab.utils.lab_api.math import (
   quat_apply,
   quat_apply_inverse,
@@ -54,10 +55,15 @@ class ModelInterface(Protocol):
   """Size of the action."""
   feature_dim: int
   """Size of :meth:`invariant_features`."""
+  critic_dim: int
+  """Size of :meth:`critic_input`."""
   nq: int
   """Number of actuated joints."""
   max_step_reward: float
   """Largest reward one step can earn (already multiplied by dt); normalises returns."""
+  return_sampler: ReturnSampler
+  """The env's reset sampler. The runner credits it the returns of finished episodes,
+  advances its past weights once per iteration, logs and checkpoints it."""
 
   def state_from_sim(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
     """Current sim state of the envs, (N, state_dim) (or (len(env_ids), state_dim))."""
@@ -83,14 +89,14 @@ class ModelInterface(Protocol):
     """(grad) Translation/yaw-invariant features (B, feature_dim) of ``s`` (B, S)."""
     ...
 
-  def observation(
+  def actor_observation(
     self,
     s: torch.Tensor,
     a_prev: torch.Tensor,
     env_idx: torch.Tensor,
     frame: torch.Tensor,
   ) -> torch.Tensor:
-    """(grad) Noise-free observation frame.
+    """(grad) Noise-free actor observation frame, as the env's actor group shows it.
 
     Args:
       s: (B, state_dim) state.
@@ -112,6 +118,25 @@ class ModelInterface(Protocol):
 
   def goal(self, s: torch.Tensor, frame: torch.Tensor) -> torch.Tensor:
     """(grad) Goal (B, goal_dim) of state ``s`` (B, S) at frame ``frame`` (B,)."""
+    ...
+
+  def critic_input(
+    self,
+    s: torch.Tensor,
+    frame: torch.Tensor,
+    features: torch.Tensor,
+    goal: torch.Tensor,
+    context: torch.Tensor,
+  ) -> torch.Tensor:
+    """(grad) Input (B, critic_dim) of the critic V(s) at frame ``frame`` (B,).
+
+    Args:
+      s: (B, state_dim) state.
+      frame: (B,) int64 frame the goal of ``s`` is computed at.
+      features: (B, feature_dim) ``invariant_features(s)``.
+      goal: (B, goal_dim) ``goal(s, frame)``.
+      context: (B, context_dim) normalised sim context of each row's env.
+    """
     ...
 
   def reward(
@@ -144,30 +169,6 @@ class ModelInterface(Protocol):
 
   def clip_end(self, frame: torch.Tensor) -> torch.Tensor:
     """Exclusive end frame (B,) int64 of the clip each frame (B,) belongs to."""
-    ...
-
-  def bin_of(self, frame: torch.Tensor) -> torch.Tensor:
-    """Reset-sampler bin (B,) int64 of each frame (B,)."""
-    ...
-
-  def update_bin_returns(self, bins: torch.Tensor, returns: torch.Tensor) -> None:
-    """Feed observed discounted returns (M,) from bins (M,) to the reset sampler."""
-    ...
-
-  def update_past_weights(self) -> None:
-    """Advance the sampler's memory of past sampling weights; once per iteration."""
-    ...
-
-  def sampler_state_dict(self) -> dict[str, torch.Tensor]:
-    """Reset-sampler state to checkpoint (bin returns, past weights)."""
-    ...
-
-  def load_sampler_state_dict(self, state: dict[str, torch.Tensor]) -> None:
-    """Restore the reset-sampler state saved by :meth:`sampler_state_dict`."""
-    ...
-
-  def sampler_log(self) -> dict[str, float]:
-    """Scalars about the reset sampler to log (e.g. reset entropy, mean bin return)."""
     ...
 
 

@@ -106,7 +106,14 @@ def _update_in_place(normalizer: EmpiricalNormalization, x: torch.Tensor) -> Non
 
 
 class Critic(nn.Module):
-  """State value V(features, goal, xi); running input normaliser, no target net."""
+  """State value V of critic inputs (``ModelInterface.critic_input``); running input
+  normaliser, no target net.
+
+  :meth:`forward` normalises its input. A fit normalises its batch once
+  (:meth:`normalize`) and then works on normalised inputs (:meth:`normalized_value`,
+  :meth:`loss`): rsl_rl's :meth:`update_normalizer` replaces the std tensor, so a CUDA
+  graph must not read the normaliser.
+  """
 
   def __init__(self, input_dim: int, hidden_dims: tuple[int, ...]) -> None:
     super().__init__()
@@ -115,4 +122,21 @@ class Critic(nn.Module):
 
   def forward(self, x: torch.Tensor) -> torch.Tensor:
     """Value (...,) of critic inputs (..., input_dim)."""
-    return self.mlp(self.normalizer(x)).squeeze(-1)
+    return self.normalized_value(self.normalize(x))
+
+  def update_normalizer(self, x: torch.Tensor) -> None:
+    """Update the running input statistics with critic inputs (M, input_dim)."""
+    self.normalizer.update(x)
+
+  def normalize(self, x: torch.Tensor) -> torch.Tensor:
+    """Normalised critic inputs (..., input_dim)."""
+    return self.normalizer(x)
+
+  def normalized_value(self, x: torch.Tensor) -> torch.Tensor:
+    """Value (...,) of normalised critic inputs (..., input_dim)."""
+    return self.mlp(x).squeeze(-1)
+
+  def loss(self, x: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    """Mean squared error () of V on normalised inputs x (M, input_dim) vs targets
+    (M,)."""
+    return (self.normalized_value(x) - targets).square().mean()

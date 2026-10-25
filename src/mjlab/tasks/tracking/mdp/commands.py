@@ -10,6 +10,7 @@ import numpy as np
 import torch
 
 from mjlab.managers import CommandTerm, CommandTermCfg
+from mjlab.rl.supermimic.return_sampler import ReturnSampler
 from mjlab.utils.lab_api.math import (
   matrix_from_quat,
   normalize,
@@ -167,10 +168,15 @@ class MotionCommand(CommandTerm):
     bin_size = torch.bincount(self.bin_of_frame, minlength=self.bin_count)
     self.bin_end = torch.cumsum(bin_size, 0)
     self.bin_start = self.bin_end - bin_size
-    # "return" sampling state: return estimate G_b and past softmax weights per bin.
-    self.bin_returns = torch.zeros(self.bin_count, device=self.device)
-    self.bin_past_weights = torch.full(
-      (self.bin_count,), 1.0 / self.bin_count, device=self.device
+    # sampling_mode "return"; the SuperMimic runner feeds it the episode returns.
+    self.return_sampler = ReturnSampler(
+      self.bin_of_frame,
+      self.bin_start,
+      self.bin_end,
+      self.clip_end_of(self.bin_start),
+      g_max=cfg.g_max,
+      return_alpha=cfg.bin_return_alpha,
+      past_weight_alpha=cfg.past_weight_alpha,
     )
 
     self.bin_failed_count = torch.zeros(
@@ -385,45 +391,9 @@ class MotionCommand(CommandTerm):
     C``; play, evaluation)."""
     self.time_steps[env_ids] = self.motion.clip_start[self.start_clip[env_ids]]
 
-  def bin_sampling_probabilities(self) -> torch.Tensor:
-    """Reset distribution over bins (Nb,) of ``sampling_mode="return"``.
-
-    Paper App. D.1: 0.5 uniform + 0.4 softmax(-25 G_b / G_max) + 0.1 past weights.
-    """
-    softmax = self._bin_return_softmax()
-    return 0.5 / self.bin_count + 0.4 * softmax + 0.1 * self.bin_past_weights
-
-  def update_bin_returns(self, bins: torch.Tensor, returns: torch.Tensor) -> None:
-    """EMA of the observed returns per bin; duplicate bins are averaged first.
-
-    Args:
-      bins: (M,) int64 bin indexes.
-      returns: (M,) returns observed from those bins.
-    """
-    # No bincount or boolean-mask indexing: both wait for the GPU.
-    total = torch.zeros_like(self.bin_returns).index_add_(0, bins, returns)
-    count = torch.zeros_like(self.bin_returns).index_add_(
-      0, bins, torch.ones_like(returns)
-    )
-    alpha = self.cfg.bin_return_alpha
-    update = (1 - alpha) * self.bin_returns + alpha * (total / count.clamp(min=1.0))
-    self.bin_returns.copy_(torch.where(count > 0, update, self.bin_returns))
-
-  def update_past_weights(self) -> None:
-    """EMA of the softmax distribution; called once per training iteration."""
-    self.bin_past_weights.lerp_(self._bin_return_softmax(), self.cfg.past_weight_alpha)
-
-  def _bin_return_softmax(self) -> torch.Tensor:
-    return torch.softmax(-25.0 * self.bin_returns / self.cfg.g_max, dim=0)
-
   def _return_sampling(self, env_ids: torch.Tensor):
-    probabilities = self.bin_sampling_probabilities()
-    bins = torch.multinomial(probabilities, len(env_ids), replacement=True)
-    start = self.bin_start[bins]
-    # Never a clip's last frame: the reset's frame advance would leave the clip.
-    stop = torch.minimum(self.bin_end[bins], self.clip_end_of(start) - 1)
-    offset = (torch.rand(len(env_ids), device=self.device) * (stop - start)).long()
-    self.time_steps[env_ids] = torch.minimum(start + offset, stop - 1)
+    frames, probabilities = self.return_sampler.sample_frames(len(env_ids))
+    self.time_steps[env_ids] = frames
     self._update_sampling_metrics(probabilities)
 
   def _update_sampling_metrics(self, sampling_probabilities: torch.Tensor) -> None:
@@ -806,6 +776,13 @@ class MotionCommandCfg(CommandTermCfg):
   """Return sampling: EMA factor of the per-bin return estimates."""
   past_weight_alpha: float = 1e-4
   """Return sampling: EMA factor of the past softmax weights, per iteration."""
+  termination_z_temperature: float = 0.02
+  """SuperMimic imagination: sigmoid temperature (m) of the soft anchor-height
+  termination (``TrackingModelInterface.termination_soft``; supermimic_vibed's
+  value, mdp.py:155-162)."""
+  termination_tilt_temperature: float = 0.04
+  """SuperMimic imagination: sigmoid temperature of the soft anchor-tilt
+  termination (supermimic_vibed's value)."""
 
   @dataclass
   class VizCfg:

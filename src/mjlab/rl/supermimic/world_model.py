@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-
 import torch
 from rsl_rl.modules import EmpiricalNormalization
 from torch import nn
@@ -11,6 +9,10 @@ from torch import nn
 from mjlab.rl.supermimic.config import WorldModelCfg
 from mjlab.rl.supermimic.interface import FloatingBaseState, ModelInterface
 from mjlab.rl.supermimic.networks import _update_in_place
+from mjlab.rl.supermimic.replay_buffer import ReplayBuffer
+
+# Transitions per chunk of the end-of-prefill statistics fit.
+_STATISTICS_CHUNK = 16384
 
 
 class WorldModel(nn.Module):
@@ -20,7 +22,8 @@ class WorldModel(nn.Module):
   increment is y * nominal_scale and the next state is ``integrate(s, increment)``. The
   last layer is zero-initialised so an untrained model predicts "no change". Input
   statistics and nominal scales are fitted from the replay buffer at the end of the
-  prefill (:meth:`fit_statistics`) and then kept running (:meth:`update_statistics`,
+  prefill (:meth:`fit_statistics`) and then kept running on the logged transitions of
+  every fit's windows (:meth:`update_statistics_from_windows`,
   ``WorldModelCfg.statistics_horizon``); they are buffers (saved with the state dict,
   no gradient) and are updated in place, because the CUDA graphs of the compiled loss
   and imagination step read them by address.
@@ -39,6 +42,7 @@ class WorldModel(nn.Module):
   ) -> None:
     super().__init__()
     self.state = state
+    self.statistics_horizon = cfg.statistics_horizon
     input_dim = state.feature_dim + action_dim + context_dim
     self.input_normalizer = EmpiricalNormalization(input_dim)
     layers: list[nn.Module] = []
@@ -58,6 +62,13 @@ class WorldModel(nn.Module):
     )
     self.register_buffer("statistics_fitted", torch.tensor(False))
 
+  @staticmethod
+  def dynamics_input(
+    features: torch.Tensor, action: torch.Tensor, context: torch.Tensor
+  ) -> torch.Tensor:
+    """Unnormalised dynamics input (..., F + A + C) = [features(s), a, xi]."""
+    return torch.cat((features, action, context), dim=-1)
+
   def normalized_increment(
     self, features: torch.Tensor, action: torch.Tensor, context: torch.Tensor
   ) -> torch.Tensor:
@@ -68,7 +79,7 @@ class WorldModel(nn.Module):
       action: (B, A) action.
       context: (B, C) normalised sim context.
     """
-    x = self.input_normalizer(torch.cat((features, action, context), dim=-1))
+    x = self.input_normalizer(self.dynamics_input(features, action, context))
     return self.dynamics(x)
 
   def step(
@@ -83,15 +94,62 @@ class WorldModel(nn.Module):
     return self.state.integrate(s, y * self.nominal_scale)
 
   @torch.no_grad()
-  def fit_statistics(self, chunks: Iterable[tuple[torch.Tensor, torch.Tensor]]) -> None:
-    """Fit input statistics and nominal scales from logged transitions (end of prefill).
+  def fit_statistics(
+    self, buffer: ReplayBuffer, iface: ModelInterface, context: torch.Tensor
+  ) -> None:
+    """Fit input statistics and nominal scales from every transition in the buffer
+    (end of prefill); see :meth:`update_statistics`.
 
-    Each chunk is (inputs (M, F + A + C) = [features(s), a, xi], increments
-    (M, delta_dim) = delta(s, s_next)); see :meth:`update_statistics`.
+    Args:
+      buffer: the replay buffer.
+      iface: the task's model interface (invariant features).
+      context: (N, C) normalised sim context of every env.
     """
-    for inputs, increments in chunks:
-      self.update_statistics(inputs, increments)
+    for chunk in buffer.iter_transitions(_STATISTICS_CHUNK):
+      s, s_next = chunk["state"], chunk["next_state"]
+      inputs = self.dynamics_input(
+        iface.invariant_features(s), chunk["action"], context[chunk["env_idx"]]
+      )
+      self.update_statistics(inputs, self.state.delta(s, s_next))
     self.statistics_fitted.fill_(True)
+
+  @torch.no_grad()
+  def update_statistics_from_windows(
+    self,
+    batches: list[dict[str, torch.Tensor]],
+    iface: ModelInterface,
+    context: torch.Tensor,
+  ) -> None:
+    """Running update of the statistics from the logged transitions of sampled windows
+    (real data only, never imagined states).
+
+    Transition m of a window goes from the logged state s_m (s_0, then the targets) to
+    targets[:, m] under actions[:, m]. The moving-average horizon is
+    ``statistics_horizon`` updates of this size.
+
+    Args:
+      batches: outputs of ``ReplayBuffer.sample_windows``.
+      iface: the task's model interface (invariant features).
+      context: (N, C) normalised sim context of every env.
+    """
+
+    def cat(key: str) -> torch.Tensor:
+      return torch.cat([windows[key] for windows in batches])
+
+    s0, actions, targets = cat("s0"), cat("actions"), cat("targets")
+    valid = cat("valid") > 0  # (B, k)
+    num, k = valid.shape
+    next_features = iface.invariant_features(targets.flatten(0, 1)).view(num, k, -1)
+    features = torch.cat(
+      (iface.invariant_features(s0).unsqueeze(1), next_features[:, :-1]), dim=1
+    )
+    states = torch.cat((s0.unsqueeze(1), targets[:, :-1]), dim=1)
+    window_context = context[cat("env_idx")].unsqueeze(1).expand(-1, k, -1)
+    inputs = self.dynamics_input(features, actions, window_context)[valid]
+    increments = self.state.delta(states, targets)[valid]
+    self.update_statistics(
+      inputs, increments, max_count=self.statistics_horizon * inputs.shape[0]
+    )
 
   @torch.no_grad()
   def update_statistics(

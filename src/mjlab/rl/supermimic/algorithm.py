@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 import torch
@@ -14,17 +14,18 @@ from mjlab.rl.supermimic.networks import Critic, MotionPolicy
 from mjlab.rl.supermimic.replay_buffer import ReplayBuffer
 from mjlab.rl.supermimic.world_model import WorldModel, world_model_loss
 
-_STATISTICS_CHUNK = 16384
-
 
 @dataclass
 class ImaginedRollout:
   """Detached imagined trajectories for the critic fit.
 
-  features (H + 1, B, F) and goals (H + 1, B, G) of s_0..s_H; rewards (H, B) r_1..r_H;
-  terminations (H, B) termination probabilities d_1..d_H; context (B, C).
+  states (H + 1, B, S) s_0..s_H, their goal frames (H + 1, B) k_0..k_H, features
+  (H + 1, B, F) and goals (H + 1, B, G); rewards (H, B) r_1..r_H; terminations (H, B)
+  termination probabilities d_1..d_H; context (B, C).
   """
 
+  states: torch.Tensor
+  frames: torch.Tensor
   features: torch.Tensor
   goals: torch.Tensor
   rewards: torch.Tensor
@@ -116,9 +117,7 @@ class SuperMimic:
     self.policy = MotionPolicy(
       iface.obs_term_dims, iface.goal_dim, iface.action_dim, policy_cfg
     ).to(self.device)
-    self.critic = Critic(
-      iface.feature_dim + iface.goal_dim + iface.context_dim, critic_cfg.hidden
-    ).to(self.device)
+    self.critic = Critic(iface.critic_dim, critic_cfg.hidden).to(self.device)
     # With compile, Adam runs fused (one kernel per step, same update rule).
     fused = True if compile else None
     self.world_model_optimizer = torch.optim.Adam(
@@ -155,7 +154,7 @@ class SuperMimic:
     )
     self._reward = _maybe_compile(iface.reward, compile)
     self._termination = _maybe_compile(iface.termination_soft, compile)
-    self._critic_loss = _maybe_compile(self.critic_loss, compile, graphs)
+    self._critic_loss = _maybe_compile(self.critic.loss, compile, graphs)
 
   def set_learning_rate_scale(self, scale: float) -> None:
     """Set every optimiser's learning rate to its configured value times ``scale``."""
@@ -173,12 +172,6 @@ class SuperMimic:
     """Deterministic action (N, A) from the env history (N, H * O) and goal (N, G)."""
     return self.policy(obs_hist, goal)
 
-  def critic_input(
-    self, features: torch.Tensor, goal: torch.Tensor, context: torch.Tensor
-  ) -> torch.Tensor:
-    """Critic input (..., F + G + C)."""
-    return torch.cat((features, goal, context), dim=-1)
-
   @torch.no_grad()
   def value(
     self, s: torch.Tensor, frame: torch.Tensor, env_idx: torch.Tensor
@@ -186,60 +179,15 @@ class SuperMimic:
     """V (M,) of states s (M, S) whose next observation targets ``frame`` (M,)."""
     features, goal = self._state_heads(s, frame)
     context = self.iface.context_normalized()[env_idx]
-    x = self.critic_input(features, goal, context)
-    return self.critic(x)
+    return self.critic(self.iface.critic_input(s, frame, features, goal, context))
 
   # World model.
-
-  def _statistics_chunks(
-    self, buffer: ReplayBuffer, context_all: torch.Tensor
-  ) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
-    iface = self.iface
-    for chunk in buffer.iter_transitions(_STATISTICS_CHUNK):
-      s, s_next = chunk["state"], chunk["next_state"]
-      context = context_all[chunk["env_idx"]]
-      inputs = torch.cat((iface.invariant_features(s), chunk["action"], context), -1)
-      yield inputs, self.state.delta(s, s_next)
 
   @torch.no_grad()
   def fit_world_model_statistics(self, buffer: ReplayBuffer) -> None:
     """Fit the world model's input statistics and nominal scales (end of prefill) from
     every transition in the buffer."""
-    context_all = self.iface.context_normalized()
-    self.world_model.fit_statistics(self._statistics_chunks(buffer, context_all))
-
-  @torch.no_grad()
-  def update_world_model_statistics(
-    self, batches: list[dict[str, torch.Tensor]], context_all: torch.Tensor
-  ) -> None:
-    """Running update of the world model's statistics from the logged transitions of
-    sampled windows (real data only, never imagined states).
-
-    Transition m of a window goes from the logged state s_m (s_0, then the targets) to
-    targets[:, m] under actions[:, m]. The moving-average horizon is
-    ``statistics_horizon`` fits of this size.
-    """
-    iface = self.iface
-
-    def cat(key: str) -> torch.Tensor:
-      return torch.cat([windows[key] for windows in batches])
-
-    s0, actions, targets = cat("s0"), cat("actions"), cat("targets")
-    valid = cat("valid") > 0  # (B, k)
-    num, k = valid.shape
-    next_features = iface.invariant_features(targets.flatten(0, 1)).view(num, k, -1)
-    features = torch.cat(
-      (iface.invariant_features(s0).unsqueeze(1), next_features[:, :-1]), dim=1
-    )
-    states = torch.cat((s0.unsqueeze(1), targets[:, :-1]), dim=1)
-    context = context_all[cat("env_idx")].unsqueeze(1).expand(-1, k, -1)
-    inputs = torch.cat((features, actions, context), dim=-1)[valid]
-    increments = self.state.delta(states, targets)[valid]
-    self.world_model.update_statistics(
-      inputs,
-      increments,
-      max_count=self.world_model_cfg.statistics_horizon * inputs.shape[0],
-    )
+    self.world_model.fit_statistics(buffer, self.iface, self.iface.context_normalized())
 
   def fit_world_model(self, buffer: ReplayBuffer) -> dict[str, torch.Tensor]:
     """``batches_per_update`` Adam steps of the k-step loss, after a statistics update
@@ -254,7 +202,7 @@ class SuperMimic:
       buffer.sample_windows(cfg.batch_size, cfg.window_k)
       for _ in range(cfg.batches_per_update)
     ]
-    self.update_world_model_statistics(batches, context_all)
+    self.world_model.update_statistics_from_windows(batches, self.iface, context_all)
     for windows in batches:
       loss, last_error = self._world_model_loss(
         self.world_model, self.iface, windows, context_all[windows["env_idx"]]
@@ -309,7 +257,7 @@ class SuperMimic:
     """
     action = self.policy.forward_frames(frames, goal) + action_noise
     s_next = self.world_model.step(s, features, action, context)
-    obs = self.iface.observation(s_next, action, env_idx, next_frame)
+    obs = self.iface.actor_observation(s_next, action, env_idx, next_frame)
     next_features, next_goal = self.state_heads(s_next, next_frame)
     return action, s_next, obs, next_features, next_goal
 
@@ -321,14 +269,16 @@ class SuperMimic:
     reward_frames: list[torch.Tensor],
     feature_list: list[torch.Tensor],
     goal_list: list[torch.Tensor],
+    last_frame: torch.Tensor,
     context: torch.Tensor,
   ) -> tuple[torch.Tensor, ...]:
     """Policy loss -mean J of an imagined rollout (Eq. 2), see :meth:`update_policy`.
 
     Lists hold step t at index t: states s_{t+1}, actions a_t, previous actions,
     reward frames k_t (H entries of (B, ...)); features and goals of s_0..s_H (H + 1).
-    d_{t+1} is the task's soft termination of s_{t+1} judged at k_t, the frame the env
-    judges the transition against.
+    ``last_frame`` (B,) is k_H, the goal frame of s_H. d_{t+1} is the task's soft
+    termination of s_{t+1} judged at k_t, the frame the env judges the transition
+    against.
 
     Returns:
       loss (), rewards (H, B), terminations (H, B), weighted rewards (H, B),
@@ -352,7 +302,9 @@ class SuperMimic:
     discount = cfg.gamma ** torch.arange(horizon, device=reward.device).unsqueeze(-1)
     weighted_reward = survival * reward
     terminal_value = self.critic(
-      self.critic_input(feature_list[-1], goal_list[-1], context)
+      self.iface.critic_input(
+        states[-1], last_frame, feature_list[-1], goal_list[-1], context
+      )
     )
     objective = (discount * weighted_reward).sum(dim=0)
     objective = objective + cfg.gamma**horizon * survival_next[-1] * terminal_value
@@ -395,7 +347,7 @@ class SuperMimic:
       hist_env = env_idx.repeat_interleave(cfg.history_length)
       hist_frames = seeds["frame_hist"].flatten()
       frames = iface.add_observation_noise(
-        iface.observation(hist_states, hist_actions, hist_env, hist_frames)
+        iface.actor_observation(hist_states, hist_actions, hist_env, hist_frames)
       ).view(num, cfg.history_length, iface.obs_dim)
 
     frozen = (self.world_model, self.critic)
@@ -448,6 +400,7 @@ class SuperMimic:
       reward_frames,
       feature_list,
       goal_list,
+      frame,
       context,
     )
 
@@ -467,6 +420,8 @@ class SuperMimic:
       "imagined_survival": survival_next[-1].detach().mean(),
     }
     rollout = ImaginedRollout(
+      states=torch.stack([seeds["s0"], *states]).detach(),
+      frames=torch.stack([*reward_frames, frame]),
       features=all_features.detach(),
       goals=all_goals.detach(),
       rewards=reward.detach(),
@@ -476,10 +431,6 @@ class SuperMimic:
     return metrics, rollout
 
   # Critic.
-
-  def critic_loss(self, x: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-    """Mean squared error () of V on normalised critic inputs x (M, D) vs (M,)."""
-    return (self.critic.mlp(x).squeeze(-1) - targets).square().mean()
 
   def fit_critic(self, rollout: ImaginedRollout) -> dict[str, torch.Tensor]:
     """Fit V to lambda-return targets of the imagined rollout (Eq. 3).
@@ -492,13 +443,18 @@ class SuperMimic:
     cfg = self.critic_cfg
     steps = rollout.features.shape[0]
     context = rollout.context.unsqueeze(0).expand(steps, -1, -1)
-    x = self.critic_input(rollout.features, rollout.goals, context)
-    x = x.flatten(0, 1)
-    self.critic.normalizer.update(x)
+    x = self.iface.critic_input(
+      rollout.states.flatten(0, 1),
+      rollout.frames.flatten(),
+      rollout.features.flatten(0, 1),
+      rollout.goals.flatten(0, 1),
+      context.flatten(0, 1),
+    )
+    self.critic.update_normalizer(x)
     # The normaliser stays fixed during the fit: normalise every input once.
-    x = self.critic.normalizer(x)
+    x = self.critic.normalize(x)
     with torch.no_grad():
-      values = self.critic.mlp(x).view(steps, -1)
+      values = self.critic.normalized_value(x).view(steps, -1)
       targets = lambda_returns(
         rollout.rewards, rollout.terminations, values, self.policy_cfg.gamma, cfg.lam
       )

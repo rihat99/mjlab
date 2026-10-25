@@ -163,7 +163,7 @@ class SuperMimicRunner:
       self.alg.set_learning_rate_scale(lr_scale)
       t0 = self._clock()
       self._collect(sim_steps_at(it, col.sim_steps_per_iteration), it)
-      self.interface.update_past_weights()
+      self.interface.return_sampler.update_past_weights()
       t1 = self._clock()
       assert self.buffer is not None
       metrics = self.alg.fit_world_model(self.buffer)
@@ -195,7 +195,7 @@ class SuperMimicRunner:
     """Save networks, normalisers, nominal scales, optimisers, the reset-sampler state
     and the iteration (number of completed iterations). The replay is not saved."""
     saved = self.alg.state_dict()
-    saved["sampler_state_dict"] = self.interface.sampler_state_dict()
+    saved["sampler_state_dict"] = self.interface.return_sampler.state_dict()
     saved["iter"] = self.current_learning_iteration
     env_state = {"common_step_counter": self.env.unwrapped.common_step_counter}
     saved["infos"] = {**(infos or {}), "env_state": env_state}
@@ -215,7 +215,7 @@ class SuperMimicRunner:
     parts = _ALL_PARTS if load_cfg is None else load_cfg
     self.alg.load_state_dict(loaded, parts, strict)
     if parts.get("sampler"):
-      self.interface.load_sampler_state_dict(loaded["sampler_state_dict"])
+      self.interface.return_sampler.load_state_dict(loaded["sampler_state_dict"])
     if parts.get("iteration"):
       self.current_learning_iteration = loaded["iter"]
     infos = loaded["infos"]
@@ -295,6 +295,7 @@ class SuperMimicRunner:
         action=action,
         frame=frame,
         done=done,
+        terminated=terminated,
         terminal_state=terminal,
         episode_step=self.episode_step,
       )
@@ -311,12 +312,12 @@ class SuperMimicRunner:
   def _finish_episodes(
     self, env_ids: torch.Tensor, truncated: torch.Tensor, terminal: torch.Tensor
   ) -> None:
-    """Credit the discounted returns of finished episodes to the reset-sampler bins.
+    """Credit the discounted returns of finished episodes to the reset sampler.
 
     The return-to-go G_t is computed backwards from the episode end, bootstrapped with
     V(s_T) for truncated episodes (0 for terminated ones, and for all episodes before
-    the critic's first fit); every bin the episode entered gets G at its first step in
-    that bin.
+    the critic's first fit); ``ReturnSampler.credit_episodes`` gives every bin the
+    episode entered G at its first step in that bin.
     """
     iface = self.interface
     gamma = self.policy_cfg.gamma
@@ -340,14 +341,7 @@ class SuperMimicRunner:
     tail = torch.flip(torch.cumsum(torch.flip(rewards * discount, [1]), 1), [1])
     returns = tail / discount
     returns += (gamma ** (lengths.unsqueeze(1) - steps).double()) * bootstrap[:, None]
-    bins = iface.bin_of(frames.flatten()).view_as(frames)
-    entered = torch.ones_like(mask)
-    entered[:, 1:] = bins[:, 1:] != bins[:, :-1]
-    first = mask & entered
-    first_returns = returns[first].float()
-    if not torch.isfinite(first_returns).all():
-      raise RuntimeError("Non-finite episode return for the reset sampler.")
-    iface.update_bin_returns(bins[first], first_returns)
+    iface.return_sampler.credit_episodes(frames, returns, mask)
 
     stats = self._log_stats
     stats["episode_reward_sum"] += rewards.sum()
@@ -416,7 +410,7 @@ class SuperMimicRunner:
         max_step_reward * length_sum
       )
       scalars["Train/termination_rate"] = float(stats["terminated"]) / stats["episodes"]
-    for key, value in self.interface.sampler_log().items():
+    for key, value in self.interface.return_sampler.log().items():
       scalars[f"Metrics/sampler_{key}"] = value
     names = ("sim", "world_model", "policy", "critic")
     for name, total in zip(names, stats["times"], strict=True):

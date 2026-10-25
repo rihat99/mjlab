@@ -148,6 +148,7 @@ def test_dims_and_context(rollout) -> None:
   env, iface, _ = rollout
   assert (iface.state_dim, iface.obs_dim, iface.goal_dim) == (71, OBS_DIM, GOAL_DIM)
   assert (iface.context_dim, iface.feature_dim, iface.action_dim) == (33, 68, 29)
+  assert iface.critic_dim == 68 + GOAL_DIM + 33
   assert iface.obs_term_dims == OBS_TERM_DIMS
   group_dims = env.observation_manager.group_obs_dim
   assert group_dims["actor"] == (10 * OBS_DIM,) and group_dims["goal"] == (GOAL_DIM,)
@@ -172,7 +173,9 @@ def test_observation_and_goal_match_env(rollout) -> None:
   obs_err = goal_err = 0.0
   for step in steps:
     newest = _newest_frame(step["actor"], iface.obs_term_dims)
-    obs = iface.observation(step["s_post"], step["a_post"], env_idx, step["frame_post"])
+    obs = iface.actor_observation(
+      step["s_post"], step["a_post"], env_idx, step["frame_post"]
+    )
     goal = iface.goal(step["s_post"], step["frame_post"])
     obs_err = max(obs_err, float((obs - newest).abs().max()))
     goal_err = max(goal_err, float((goal - step["goal"]).abs().max()))
@@ -180,15 +183,19 @@ def test_observation_and_goal_match_env(rollout) -> None:
   assert goal_err <= 1e-5
 
 
-def test_termination_matches_env(rollout) -> None:
-  _, iface, steps = rollout
+def test_termination_matches_env(rollout, monkeypatch: pytest.MonkeyPatch) -> None:
+  env, _, steps = rollout
   terminated = _stack(steps, "terminated").flatten()
   frames = _stack(steps, "frame").flatten()
   assert int(terminated.sum()) >= 3
   # The env's rule saw the state one substep before s_next. At vanishing
   # temperatures the soft rule is the env's threshold rule.
+  command_cfg = env.command_manager.get_term("motion").cfg
+  monkeypatch.setattr(command_cfg, "termination_z_temperature", 1e-6)
+  monkeypatch.setattr(command_cfg, "termination_tilt_temperature", 1e-6)
+  sharp = TrackingModelInterface(env)
   stale = _stack(steps, "stale").flatten(0, 1)
-  soft = iface.termination_soft(stale, frames, z_temp=1e-6, tilt_temp=1e-6)
+  soft = sharp.termination_soft(stale, frames)
   assert torch.equal(soft > 0.5, terminated)
 
 
@@ -306,7 +313,7 @@ def test_gradients_are_finite(rollout) -> None:
   next_frames = torch.minimum(frames + 1, iface.clip_end(frames) - 1)
   goal = iface.goal(s_next, next_frames)
   obs = iface.add_observation_noise(
-    iface.observation(s_next, a_prev, env_idx, next_frames)
+    iface.actor_observation(s_next, a_prev, env_idx, next_frames)
   )
   (reward.sum() + goal.sum() + obs.sum()).backward()
   grad = s_next.grad

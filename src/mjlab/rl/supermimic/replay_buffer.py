@@ -17,8 +17,9 @@ class ReplayBuffer:
 
   Row j of env n holds the transition that started at state s_j: the state, the executed
   (noisy) action, the reference frame k_j, whether the step ended the episode
-  (terminated or truncated), the captured pre-reset state s_{j+1} when it did (the next
-  row then starts a new episode) and the step index within the episode. Storage is
+  (``done``: terminated or truncated) and whether it ended it by a failure
+  (``terminated``), the captured pre-reset state s_{j+1} when it did (the next row then
+  starts a new episode) and the step index within the episode. Storage is
   time-major, (capacity, num_envs, ...). Ages count rows from the oldest stored one
   (age 0) to the newest (age size - 1).
   """
@@ -39,6 +40,7 @@ class ReplayBuffer:
     self.action = torch.zeros((*shape, action_dim), device=self.device)
     self.frame = torch.zeros(shape, dtype=torch.long, device=self.device)
     self.done = torch.zeros(shape, dtype=torch.bool, device=self.device)
+    self.terminated = torch.zeros(shape, dtype=torch.bool, device=self.device)
     self.terminal_state = torch.zeros((*shape, state_dim), device=self.device)
     self.episode_step = torch.zeros(shape, dtype=torch.int32, device=self.device)
     self.ptr = 0
@@ -50,6 +52,7 @@ class ReplayBuffer:
     action: torch.Tensor,
     frame: torch.Tensor,
     done: torch.Tensor,
+    terminated: torch.Tensor,
     terminal_state: torch.Tensor,
     episode_step: torch.Tensor,
   ) -> None:
@@ -59,6 +62,7 @@ class ReplayBuffer:
     self.action[row] = action
     self.frame[row] = frame
     self.done[row] = done
+    self.terminated[row] = terminated
     self.terminal_state[row] = terminal_state
     self.episode_step[row] = episode_step
     self.ptr = (self.ptr + 1) % self.capacity

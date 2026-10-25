@@ -115,32 +115,34 @@ def test_future_frames_clamp_to_clip_end(env: ManagerBasedRlEnv) -> None:
 
 def test_return_sampling(env: ManagerBasedRlEnv) -> None:
   command = _command(env)
+  sampler = command.return_sampler
   assert command.cfg.sampling_mode == "return"
   num_bins = command.bin_count
-  probs = command.bin_sampling_probabilities()
+  assert sampler.bin_count == num_bins
+  probs = sampler.probabilities()
   torch.testing.assert_close(probs, torch.full_like(probs, 1 / num_bins))
 
   bins = torch.tensor([0, 0, 3], device=env.device)
-  command.update_bin_returns(bins, torch.tensor([8.0, 4.0, 1.0], device=env.device))
+  sampler.update_returns(bins, torch.tensor([8.0, 4.0, 1.0], device=env.device))
   expected_returns = torch.zeros(num_bins, device=env.device)
   expected_returns[0], expected_returns[3] = 0.1 * 6.0, 0.1 * 1.0
-  torch.testing.assert_close(command.bin_returns, expected_returns)
+  torch.testing.assert_close(sampler.bin_returns, expected_returns)
   softmax = torch.softmax(-25.0 * expected_returns / 10.0, dim=0)
-  probs = command.bin_sampling_probabilities()
+  probs = sampler.probabilities()
   torch.testing.assert_close(probs, 0.5 / num_bins + 0.4 * softmax + 0.1 / num_bins)
   torch.testing.assert_close(probs.sum(), torch.tensor(1.0, device=env.device))
   assert probs[0] < probs[3] < probs[1]
 
-  command.update_past_weights()
+  sampler.update_past_weights()
   torch.testing.assert_close(
-    command.bin_past_weights, (1 - 1e-4) / num_bins + 1e-4 * softmax
+    sampler.bin_past_weights, (1 - 1e-4) / num_bins + 1e-4 * softmax
   )
 
   # One hard bin: it receives 0.5 / Nb + 0.4 + 0.1 / Nb of the resets.
   hard_bin = 5
-  command.bin_returns[:] = 10.0
-  command.bin_returns[hard_bin] = 0.0
-  command.bin_past_weights[:] = 1 / num_bins
+  sampler.bin_returns[:] = 10.0
+  sampler.bin_returns[hard_bin] = 0.0
+  sampler.bin_past_weights[:] = 1 / num_bins
   env_ids = torch.arange(NUM_ENVS, device=env.device)
   starts = []
   for _ in range(200):
@@ -151,8 +153,8 @@ def test_return_sampling(env: ManagerBasedRlEnv) -> None:
   hard_share = (command.bin_of(starts) == hard_bin).float().mean().item()
   assert abs(hard_share - (0.6 / num_bins + 0.4)) < 0.05
 
-  command.bin_returns.zero_()
-  command.bin_past_weights[:] = 1 / num_bins
+  sampler.bin_returns.zero_()
+  sampler.bin_past_weights[:] = 1 / num_bins
   env.reset()
 
 

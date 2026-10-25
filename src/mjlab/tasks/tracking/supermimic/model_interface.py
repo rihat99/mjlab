@@ -117,6 +117,8 @@ class TrackingModelInterface:
     self._init_reward()
     self._init_termination()
     self._context = self._read_context()
+    self.critic_dim = self.feature_dim + self.goal_dim + self.context_dim
+    self.return_sampler = command.return_sampler
 
     recorders = [
       env.recorder_manager.get_term(name) for name in env.recorder_manager.active_terms
@@ -224,6 +226,8 @@ class TrackingModelInterface:
       raise ValueError("Need both bad_anchor_pos_z_only and bad_anchor_ori.")
     self._z_threshold = thresholds[mdp.bad_anchor_pos_z_only]
     self._tilt_threshold = thresholds[mdp.bad_anchor_ori]
+    self._z_temperature = self._command.cfg.termination_z_temperature
+    self._tilt_temperature = self._command.cfg.termination_tilt_temperature
 
   def _read_context(self) -> torch.Tensor | None:
     """Normalised startup-DR context (N, 33), or None if the cfg has no such DR.
@@ -300,7 +304,7 @@ class TrackingModelInterface:
     """(grad) Features (B, 68): root height, gravity, root-frame velocities, q, qd."""
     return self._state.invariant_features(s)
 
-  def observation(
+  def actor_observation(
     self,
     s: torch.Tensor,
     a_prev: torch.Tensor,
@@ -351,6 +355,20 @@ class TrackingModelInterface:
     reference frames frame .. frame + K - 1 (clamped to the clip) in the heading
     frame of frame - 1 (``MotionCommand.reference_goal``)."""
     return self._command.reference_goal(frame, self._future_frames)
+
+  def critic_input(
+    self,
+    s: torch.Tensor,
+    frame: torch.Tensor,
+    features: torch.Tensor,
+    goal: torch.Tensor,
+    context: torch.Tensor,
+  ) -> torch.Tensor:
+    """(grad) Critic input (B, 831) = [features (B, 68), goal (B, 730), context
+    (B, 33)] of state s (B, 71) at frame (B,); features and goal are
+    ``invariant_features(s)`` and ``goal(s, frame)``."""
+    del s, frame
+    return torch.cat((features, goal, context), dim=-1)
 
   def reward_terms(
     self,
@@ -418,17 +436,12 @@ class TrackingModelInterface:
       0
     )
 
-  def termination_soft(
-    self,
-    s_next: torch.Tensor,
-    frame: torch.Tensor,
-    z_temp: float = 0.02,
-    tilt_temp: float = 0.04,
-  ) -> torch.Tensor:
+  def termination_soft(self, s_next: torch.Tensor, frame: torch.Tensor) -> torch.Tensor:
     """(grad) 1 - (1 - sigmoid((e_z - z_th) / z_temp)) (1 - sigmoid((e_tilt - tilt_th)
     / tilt_temp)), (B,): e_z and e_tilt are the anchor height and tilt errors of the
     env's termination terms for s_next (B, 71) against frame (B,), thresholds from
-    the env cfg (supermimic_vibed's temperatures, mdp.py:155-162)."""
+    the env cfg, temperatures from ``MotionCommandCfg.termination_z_temperature``
+    and ``termination_tilt_temperature``."""
     anchor_pos, anchor_quat = self._anchor_pose(s_next)
     motion = self._command.motion
     _, _, e_z, e_tilt = kernels.anchor_termination(
@@ -439,47 +452,13 @@ class TrackingModelInterface:
       z_thresh=self._z_threshold,
       tilt_thresh=self._tilt_threshold,
     )
-    alive = (1 - torch.sigmoid((e_z - self._z_threshold) / z_temp)) * (
-      1 - torch.sigmoid((e_tilt - self._tilt_threshold) / tilt_temp)
+    alive = (1 - torch.sigmoid((e_z - self._z_threshold) / self._z_temperature)) * (
+      1 - torch.sigmoid((e_tilt - self._tilt_threshold) / self._tilt_temperature)
     )
     return 1 - alive
 
-  # Reset sampler (forwarded to the MotionCommand).
+  # Clip bookkeeping.
 
   def clip_end(self, frame: torch.Tensor) -> torch.Tensor:
     """Exclusive end frame (B,) of the clip of each frame (B,)."""
     return self._command.clip_end_of(frame)
-
-  def bin_of(self, frame: torch.Tensor) -> torch.Tensor:
-    """Reset-sampler bin (B,) of each frame (B,)."""
-    return self._command.bin_of(frame)
-
-  def update_bin_returns(self, bins: torch.Tensor, returns: torch.Tensor) -> None:
-    """Feed discounted returns (M,) observed from bins (M,) to the sampler."""
-    self._command.update_bin_returns(bins, returns)
-
-  def update_past_weights(self) -> None:
-    """Advance the sampler's past-weight EMA (once per iteration)."""
-    self._command.update_past_weights()
-
-  def sampler_state_dict(self) -> dict[str, torch.Tensor]:
-    """Bin returns G_b and past weights (Nb,) each."""
-    return {
-      "bin_returns": self._command.bin_returns.clone(),
-      "bin_past_weights": self._command.bin_past_weights.clone(),
-    }
-
-  def load_sampler_state_dict(self, state: dict[str, torch.Tensor]) -> None:
-    """Restore the sampler state; the library must have the same bins."""
-    self._command.bin_returns.copy_(state["bin_returns"])
-    self._command.bin_past_weights.copy_(state["bin_past_weights"])
-
-  def sampler_log(self) -> dict[str, float]:
-    """Normalised entropy of the reset distribution and mean bin return."""
-    probs = self._command.bin_sampling_probabilities()
-    entropy = -(probs * probs.clamp_min(1e-12).log()).sum()
-    count = probs.numel()
-    return {
-      "reset_entropy": float(entropy) / math.log(count) if count > 1 else 1.0,
-      "mean_bin_return": float(self._command.bin_returns.mean()),
-    }

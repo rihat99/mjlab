@@ -32,6 +32,7 @@ from mjlab.rl.supermimic.config import (
 )
 from mjlab.rl.supermimic.interface import FloatingBaseState
 from mjlab.rl.supermimic.replay_buffer import ReplayBuffer
+from mjlab.rl.supermimic.return_sampler import ReturnSampler
 from mjlab.rl.supermimic.runner import SuperMimicRunner, sim_steps_at
 from mjlab.rl.supermimic.world_model import world_model_loss
 from mjlab.rl.vecenv_wrapper import RslRlVecEnvWrapper
@@ -58,6 +59,23 @@ def device() -> str:
   return get_test_device()
 
 
+class _CountingSampler(ReturnSampler):
+  """ReturnSampler that counts the runner's calls."""
+
+  def __init__(self, *args, **kwargs) -> None:
+    super().__init__(*args, **kwargs)
+    self.credit_calls = 0
+    self.past_weight_updates = 0
+
+  def credit_episodes(self, frames, returns, valid) -> None:
+    self.credit_calls += 1
+    super().credit_episodes(frames, returns, valid)
+
+  def update_past_weights(self) -> None:
+    self.past_weight_updates += 1
+    super().update_past_weights()
+
+
 def _term_major(frames: torch.Tensor) -> torch.Tensor:
   """(N, history, obs) -> (N, history * obs) flattened like an mjlab history group."""
   terms = torch.split(frames, list(OBS_TERM_DIMS), dim=-1)
@@ -74,11 +92,13 @@ class _SyntheticInterface:
   goal_dim = GOAL_DIM
   action_dim = NQ
   feature_dim = 10 + 2 * NQ
+  critic_dim = feature_dim + GOAL_DIM + CONTEXT_DIM
   nq = NQ
   max_step_reward = 2 * DT
 
   def __init__(self, env: "_SyntheticEnv") -> None:
     self.env = env
+    self.return_sampler = env.return_sampler
     self.layout = FloatingBaseState(NQ)
     widths = [
       torch.full((n,), w) for n, w in zip(OBS_TERM_DIMS, NOISE_WIDTHS, strict=True)
@@ -100,7 +120,7 @@ class _SyntheticInterface:
   def invariant_features(self, s):
     return self.layout.invariant_features(s)
 
-  def observation(self, s, a_prev, env_idx, frame):
+  def actor_observation(self, s, a_prev, env_idx, frame):
     del frame  # No term compares the state with the reference.
     _, quat, _, ang_vel, q, qd = self.layout.split(s)
     gravity = torch.zeros_like(ang_vel)
@@ -137,6 +157,10 @@ class _SyntheticInterface:
     )
     return per_frame.flatten(start_dim=1)
 
+  def critic_input(self, s, frame, features, goal, context):
+    del s, frame
+    return torch.cat((features, goal, context), dim=-1)
+
   def reward_terms(self, s_next, a, a_prev, frame):
     pos, _, _, _, q, _ = self.layout.split(s_next)
     env = self.env
@@ -165,33 +189,6 @@ class _SyntheticInterface:
   def clip_end(self, frame):
     return self.env.clip_end_of_frame[frame]
 
-  def bin_of(self, frame):
-    return self.env.bin_of_frame[frame]
-
-  def update_bin_returns(self, bins, returns):
-    env = self.env
-    total = torch.zeros_like(env.bin_returns).index_add_(0, bins, returns)
-    count = torch.zeros_like(env.bin_returns).index_add_(
-      0, bins, torch.ones_like(returns)
-    )
-    seen = count > 0
-    env.bin_returns[seen] = (
-      0.9 * env.bin_returns[seen] + 0.1 * total[seen] / count[seen]
-    )
-    env.bin_update_calls += 1
-
-  def update_past_weights(self):
-    self.env.past_weight_updates += 1
-
-  def sampler_state_dict(self):
-    return {"bin_returns": self.env.bin_returns.clone()}
-
-  def load_sampler_state_dict(self, state):
-    self.env.bin_returns.copy_(state["bin_returns"])
-
-  def sampler_log(self):
-    return {"mean_bin_return": float(self.env.bin_returns.mean())}
-
 
 class _SyntheticEnv:
   """Fake RslRlVecEnvWrapper (and its own ``unwrapped``) over the synthetic system."""
@@ -218,10 +215,18 @@ class _SyntheticEnv:
       first_bin += math.ceil(length / BIN_SIZE)
       start += length
     self.clip_end_of_frame = torch.tensor(clip_end, device=device)
-    self.bin_of_frame = torch.tensor(bin_of, device=device)
-    self.bin_returns = torch.zeros(first_bin, device=device)
-    self.bin_update_calls = 0
-    self.past_weight_updates = 0
+    bin_of_frame = torch.tensor(bin_of, device=device)
+    bin_end = torch.cumsum(torch.bincount(bin_of_frame), 0)
+    bin_start = bin_end - torch.bincount(bin_of_frame)
+    self.return_sampler = _CountingSampler(
+      bin_of_frame,
+      bin_start,
+      bin_end,
+      self.clip_end_of_frame[bin_start],
+      g_max=10.0,
+      return_alpha=0.1,
+      past_weight_alpha=1e-4,
+    )
     t = torch.arange(start, dtype=torch.float32).unsqueeze(-1) * DT
     phase = torch.rand(1, NQ, generator=gen) * 6.28
     self.ref_q = (0.3 * torch.sin(2.0 * t + phase)).to(device)
@@ -273,7 +278,7 @@ class _SyntheticEnv:
     self.history[env_ids] = obs.unsqueeze(1).expand(-1, HISTORY, -1)
 
   def _noisy_obs(self, env_ids: torch.Tensor) -> torch.Tensor:
-    obs = self.iface.observation(
+    obs = self.iface.actor_observation(
       self.state[env_ids], self.a_prev[env_ids], env_ids, self.frame[env_ids]
     )
     return self.iface.add_observation_noise(obs)
@@ -352,6 +357,7 @@ def _fill_buffer(
       action=action,
       frame=frame,
       done=done,
+      terminated=env.termination_manager.terminated,
       terminal_state=env.terminal_state,
       episode_step=episode_step,
     )
@@ -401,6 +407,7 @@ def test_replay_buffer_windows_and_seeds_around_dones_and_wrap():
       action=torch.full((2, 1), float(t)),
       frame=torch.full((2,), t),
       done=done,
+      terminated=done,
       terminal_state=torch.tensor([[100.0 + t, 0.0], [100.0 + t, 1.0]]),
       episode_step=episode_step,
     )
@@ -643,7 +650,9 @@ def test_runner_learn_save_load_and_inference(device, tmp_path):
   # Prefill + 15 x 2 + 15 x 3 sim steps.
   assert env.common_step_counter == 16 + 75
   assert runner.current_learning_iteration == 30
-  assert env.past_weight_updates == 30 and env.bin_update_calls > 0
+  sampler = env.return_sampler
+  assert sampler.past_weight_updates == 30 and sampler.credit_calls > 0
+  assert (sampler.bin_returns != 0).any()
   for it in (10, 20, 30):
     assert (tmp_path / f"model_{it}.pt").is_file()
   header = (tmp_path / "metrics.csv").read_text().splitlines()[0].split(",")
