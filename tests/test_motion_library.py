@@ -237,7 +237,7 @@ def test_supermimic_env_builds_and_steps(motion_files: tuple[str, ...]) -> None:
   try:
     obs, _ = env.reset()
     shapes = {k: tuple(cast(torch.Tensor, v).shape) for k, v in obs.items()}
-    assert shapes == {"actor": (4, 930), "goal": (4, 730)}
+    assert shapes == {"actor": (4, 990), "goal": (4, 730)}
     for _ in range(50):
       obs, reward, *_ = env.step(0.3 * torch.randn(4, 29, device=env.device))
       assert torch.isfinite(reward).all()

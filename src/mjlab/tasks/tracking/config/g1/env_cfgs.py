@@ -121,8 +121,10 @@ def unitree_g1_flat_tracking_supermimic_env_cfg(
   termination, and the clip end is a time-out (``motion_end``). The anchor is the
   root (pelvis). Observation groups (deployable without a position estimate):
   ``actor`` = 10-frame history of Table A.1's [joint_pos, joint_vel, base_ang_vel,
-  projected_gravity, actions], 93 per frame, 930 (flattened term-major, each term's
-  frames oldest first); ``goal`` = reference frames k_t .. k_t + 9 in the heading
+  projected_gravity, actions] plus Uni-SuperMimic's orientation error of the robot
+  anchor to the reference anchor of the current frame k_t - 1
+  (``motion_current_anchor_ori_b``), 99 per frame, 990 (flattened term-major, each
+  term's frames oldest first); ``goal`` = reference frames k_t .. k_t + 9 in the heading
   frame of frame k_t - 1, independent of the robot state
   (``motion_future_frames_reference``, 730), k_t being the frame the next reward is
   scored against. There is no critic group.
@@ -175,6 +177,12 @@ def unitree_g1_flat_tracking_supermimic_env_cfg(
       func=mdp.projected_gravity, noise=Unoise(n_min=-0.05, n_max=0.05)
     ),
     "actions": actor_terms["actions"],
+    # Uni-SuperMimic's noise scale for the 6D orientation error (mdp.py:30-39).
+    "motion_anchor_ori": ObservationTermCfg(
+      func=mdp.motion_current_anchor_ori_b,
+      params={"command_name": "motion"},
+      noise=Unoise(n_min=-0.05, n_max=0.05),
+    ),
   }
   cfg.observations = {
     "actor": ObservationGroupCfg(

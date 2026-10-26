@@ -27,8 +27,8 @@ from mjlab.tasks.tracking.supermimic import TrackingModelInterface
 from mjlab.tasks.tracking.supermimic.recorder import floating_base_state
 
 TASK_ID = "Mjlab-Tracking-Flat-Unitree-G1-SuperMimic"
-OBS_TERM_DIMS = (29, 29, 3, 3, 29)
-OBS_DIM, GOAL_DIM = 93, 730
+OBS_TERM_DIMS = (29, 29, 3, 3, 29, 6)
+OBS_DIM, GOAL_DIM = 99, 730
 NUM_ENVS = 8
 NUM_STEPS = 100
 # Envs started 3 frames before their clip end: motion_end fires on their third step.
@@ -63,7 +63,7 @@ class _PreResetQpos(RecorderTerm):
 
 
 def _newest_frame(actor: torch.Tensor, term_dims: tuple[int, ...]) -> torch.Tensor:
-  """Last history frame (N, 93) of a term-major flattened history (N, 10 * 93)."""
+  """Last history frame (N, 99) of a term-major flattened history (N, 10 * 99)."""
   history = actor.shape[-1] // sum(term_dims)
   parts = torch.split(actor, [history * d for d in term_dims], dim=-1)
   return torch.cat(

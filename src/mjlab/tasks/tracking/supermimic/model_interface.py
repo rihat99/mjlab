@@ -41,13 +41,15 @@ if TYPE_CHECKING:
 _COMMAND = "motion"
 _ACTOR = "actor"
 _GOAL = "goal"
-# Actor terms the observation head reproduces, in env order (Table A.1).
+# Actor terms the observation head reproduces, in env order (Table A.1, plus
+# Uni-SuperMimic's orientation error to the current reference frame).
 _ACTOR_FUNCS = (
   mdp.joint_pos_rel,
   mdp.joint_vel_rel,
   mdp.builtin_sensor,
   mdp.projected_gravity,
   mdp.last_action,
+  mdp.motion_current_anchor_ori_b,
 )
 # Privileged critic input: the reference anchor pose in the robot anchor frame,
 # position (3) and orientation 6D (6).
@@ -139,7 +141,7 @@ class TrackingModelInterface:
     if tuple(cfg.func for cfg in cfgs) != _ACTOR_FUNCS:
       raise ValueError(
         f"Actor terms {names} are not [joint_pos_rel, joint_vel_rel, builtin_sensor "
-        "(gyro), projected_gravity, last_action]."
+        "(gyro), projected_gravity, last_action, motion_current_anchor_ori_b]."
       )
     if not cfgs[0].params.get("biased", False):
       raise ValueError("The joint_pos actor term must use biased=True.")
@@ -160,7 +162,7 @@ class TrackingModelInterface:
       for dims, cfg in zip(term_dims, cfgs, strict=True)
     )
     self.obs_dim = sum(self.obs_term_dims)
-    expected = (self.nq, self.nq, 3, 3, self.action_dim)
+    expected = (self.nq, self.nq, 3, 3, self.action_dim, 6)
     if self.obs_term_dims != expected:
       raise ValueError(f"Actor term dims {self.obs_term_dims} != {expected}.")
     data = self._robot.data
@@ -342,16 +344,18 @@ class TrackingModelInterface:
     context: torch.Tensor,
     frame: torch.Tensor,
   ) -> torch.Tensor:
-    """(grad) Noise-free actor frame (B, 93) of state s (B, 71), Table A.1:
+    """(grad) Noise-free actor frame (B, 99) of state s (B, 71) shown with frame
+    (B,).
+
     [q + encoder bias - default q, qd, gyro (root-frame angular velocity), projected
-    gravity, a_prev]. The encoder bias comes from the episode's context (B, 33); no
-    term compares the state with the reference, so ``frame`` is unused.
+    gravity, a_prev, the reference anchor orientation of frame - 1 in the robot
+    anchor frame (6D, ``mdp.motion_current_anchor_ori_b``)]. The encoder bias comes
+    from the episode's context (B, 33).
     """
-    del frame
     _, quat, _, ang_vel_w, q, qd = self._state.split(s)
     center, half = self._bias_range
     bias = center + half * context[:, self._context_slices["encoder_bias"]]
-    return kernels.proprio_observation(
+    obs = kernels.proprio_observation(
       q,
       qd,
       quat,
@@ -360,9 +364,13 @@ class TrackingModelInterface:
       self._default_q,
       a_prev,
     )
+    _, anchor_quat = self._anchor_pose(s)
+    current = self._command.current_frames(frame)
+    ref_quat = self._command.motion.body_quat_w[current, self._anchor].float()
+    return torch.cat([obs, kernels.relative_rotation_6d(anchor_quat, ref_quat)], -1)
 
   def add_observation_noise(self, o: torch.Tensor) -> torch.Tensor:
-    """Observation (B, 93) plus fresh additive noise of each actor term's NoiseCfg
+    """Observation (B, 99) plus fresh additive noise of each actor term's NoiseCfg
     (none when the env disables corruption); the gradient of ``o`` is kept."""
     parts = torch.split(o, list(self.obs_term_dims), dim=-1)
     noisy = [
