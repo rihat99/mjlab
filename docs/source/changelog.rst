@@ -16,8 +16,9 @@ Added
   multi-clip ``MotionCommand`` (``motion_file`` takes a tuple of npz or a ``.txt``
   file listing them; only the tracked bodies are kept, in float16 except the body
   positions, so that a 47 M-frame library fits on one GPU), the ``motion_end``
-  time-out, Uni-SuperMimic's 10-frame reference goal, the paper's 93-dim proprioception plus the 6D anchor-orientation error (99-dim)
-  observation (Table A.1), pure tracking kernels with a differentiable forward
+  time-out, Uni-SuperMimic's 10-frame reference goal, the paper's 93-dim
+  proprioception (Table A.1) plus the 6D anchor-orientation error as the actor
+  observation, pure tracking kernels with a differentiable forward
   kinematics, the ``TrackingModelInterface`` that evaluates observation, goal,
   reward and termination on imagined states, and a terminal-state recorder.
   ``train`` and ``play`` accept a motion library. The learner's hot paths run
