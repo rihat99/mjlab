@@ -9,6 +9,7 @@ import time
 from collections.abc import Callable
 
 import torch
+from mujoco_warp._src.types import OverflowType
 from rsl_rl.utils import resolve_callable
 from rsl_rl.utils.logger import Logger
 from tensordict import TensorDict
@@ -26,6 +27,11 @@ from mjlab.rl.supermimic.interface import ModelInterface
 from mjlab.rl.supermimic.replay_buffer import ReplayBuffer
 from mjlab.rl.vecenv_wrapper import RslRlVecEnvWrapper
 from mjlab.utils.torch import configure_torch_backends
+
+# MuJoCo Warp's per-world overflow bits: constraint rows beyond njmax, contacts beyond
+# the shared nconmax pool. The sim drops the excess and only sets the bit.
+_CONSTRAINT_OVERFLOW = int(OverflowType.NEFC | OverflowType.NJMAX_NNZ)
+_CONTACT_OVERFLOW = int(OverflowType.BROADPHASE | OverflowType.NARROWPHASE)
 
 _ALL_PARTS = {
   "actor": True,
@@ -270,6 +276,7 @@ class SuperMimicRunner:
     col = self.collection_cfg
     clip = self.cfg["clip_actions"]
     env_ids = torch.arange(self.env.num_envs, device=self.device)
+    sim_overflow = self.env.unwrapped.sim.data.overflow
     for _ in range(num_steps):
       state = iface.state_from_sim()
       frame = iface.frame_from_sim()
@@ -282,6 +289,9 @@ class SuperMimicRunner:
       if clip is not None:
         action = action.clamp(-clip, clip)
       obs, reward, dones, extras = self.env.step(action)
+      # The bits stay set until the env's reset, which clears them inside env.step:
+      # an overflow in an episode's last step is not seen.
+      self._log_stats["sim_overflow"].bitwise_or_(sim_overflow)
       self.obs = obs.to(self.device)
       done = dones.bool()
       # A failure on the same step as a time-out counts as terminated.
@@ -378,6 +388,9 @@ class SuperMimicRunner:
       "episode_length_sum": zero.long(),
       "episodes": 0,
       "terminated": zero.long(),
+      "sim_overflow": torch.zeros(
+        self.env.num_envs, dtype=torch.int32, device=self.device
+      ),
     }
 
   def _accumulate(
@@ -414,6 +427,13 @@ class SuperMimicRunner:
       "Metrics/policy_grad_norm": means.get("policy_grad_norm"),
       "Metrics/world_model_grad_norm": means.get("world_model_grad_norm"),
       "Metrics/value_clip_fraction": means.get("value_clip_fraction"),
+      # Envs whose sim overflowed since the last row.
+      "Sim/constraint_overflow": int(
+        (stats["sim_overflow"] & _CONSTRAINT_OVERFLOW).count_nonzero()
+      ),
+      "Sim/contact_overflow": int(
+        (stats["sim_overflow"] & _CONTACT_OVERFLOW).count_nonzero()
+      ),
     }
     if stats["episodes"] > 0:
       length_sum = float(stats["episode_length_sum"])

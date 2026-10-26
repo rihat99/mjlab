@@ -7,6 +7,7 @@ env mimics RslRlVecEnvWrapper (term-major observation history, auto-reset, time-
 extras) and the synthetic interface implements the ModelInterface protocol on it.
 """
 
+import csv
 import math
 from dataclasses import asdict
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ from typing import cast
 import pytest
 import torch
 from conftest import get_test_device
+from mujoco_warp._src.types import OverflowType
 from tensordict import TensorDict
 from torch import nn
 
@@ -206,6 +208,9 @@ class _SyntheticEnv:
     self.termination_manager = SimpleNamespace(
       terminated=torch.zeros(num_envs, dtype=torch.bool, device=device)
     )
+    # MuJoCo Warp's per-world overflow bits; the synthetic env never clears them.
+    overflow = torch.zeros(num_envs, dtype=torch.int32, device=device)
+    self.sim = SimpleNamespace(data=SimpleNamespace(overflow=overflow))
     self.cfg: dict = {}
     self.max_episode_length = MAX_EPISODE_LENGTH
     self.episode_length_buf = torch.zeros(num_envs, dtype=torch.long, device=device)
@@ -745,6 +750,8 @@ def test_runner_learn_save_load_and_inference(device, tmp_path):
     ),
   )
   wrapped = cast(RslRlVecEnvWrapper, env)
+  env.sim.data.overflow[3] = OverflowType.NEFC
+  env.sim.data.overflow[5:7] = OverflowType.NARROWPHASE
   runner = SuperMimicRunner(wrapped, asdict(cfg), log_dir=str(tmp_path), device=device)
   runner.learn(num_learning_iterations=30, init_at_random_ep_len=True)
 
@@ -775,6 +782,11 @@ def test_runner_learn_save_load_and_inference(device, tmp_path):
     "Metrics/sampler_top1_probability_uncapped",
   ):
     assert tag in header
+  with open(tmp_path / "metrics.csv") as handle:
+    rows = list(csv.DictReader(handle))
+  assert len(rows) == 3
+  assert all(float(row["Sim/constraint_overflow"]) == 1 for row in rows)
+  assert all(float(row["Sim/contact_overflow"]) == 2 for row in rows)
 
   obs = env.get_observations()
   actions = runner.get_inference_policy(device)(obs)
