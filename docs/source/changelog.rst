@@ -16,21 +16,38 @@ Added
   multi-clip ``MotionCommand`` (``motion_file`` takes a tuple of npz or a ``.txt``
   file listing them; only the tracked bodies are kept, in float16 except the body
   positions, so that a 47 M-frame library fits on one GPU), the ``motion_end``
-  time-out, Uni-SuperMimic's 10-frame reference goal and orientation-error
-  observation, pure tracking kernels with a differentiable forward kinematics, the
-  ``TrackingModelInterface`` that evaluates observation, goal, reward and
-  termination on imagined states, a terminal-state recorder, and the
-  ``evaluate_library`` script (each clip once from frame 0, in waves of at most
-  ``--num-envs`` clips). ``train`` and ``play`` accept a motion library. The
-  learner's hot paths run through ``torch.compile`` and CUDA graphs; imagination
-  ends with the task's analytic termination, and ``PolicyCfg.seed_end_margin``
-  (default 10) keeps the last imagined state away from the clip end, where the
-  critic is never fit. The task uses the contact physics of Uni-SuperMimic: no
-  robot self-collision, and the startup friction randomisation on every robot
-  collision geom with the ground at 0.3 in training.
+  time-out, Uni-SuperMimic's 10-frame reference goal, the paper's 93-dim
+  observation (Table A.1), pure tracking kernels with a differentiable forward
+  kinematics, the ``TrackingModelInterface`` that evaluates observation, goal,
+  reward and termination on imagined states, and a terminal-state recorder.
+  ``train`` and ``play`` accept a motion library. The learner's hot paths run
+  through ``torch.compile`` (with inductor's combo kernels) and CUDA graphs;
+  imagination ends with the task's analytic termination (temperatures in
+  ``MotionCommandCfg.termination_z_temperature`` and
+  ``termination_tilt_temperature``), and ``PolicyCfg.seed_end_margin`` (default 10)
+  keeps the last imagined state away from the clip end, where the critic is never
+  fit. Critic values are clamped to ``max_step_reward / (1 - gamma)`` in the
+  λ-return targets and bootstraps, the critic sees the reference root pose in the
+  robot root frame, imagined actions are noise-free, and the reset sampler caps a
+  bin's softmax share at ``MotionCommandCfg.softmax_cap`` (50) times the uniform
+  share. The task simulates full robot self-collision without a penalty, randomises
+  the friction of every robot collision geom (ground at 0.3 in training) and the
+  encoder bias per episode and the torso CoM once per env; the sim context is
+  stored with every replay transition.
+- Added the ``evaluate_library`` script for tracking tasks: each clip of a library
+  once from frame 0 with a deterministic policy, in waves of at most ``--num-envs``
+  clips, into ``eval_library_<checkpoint stem>.json`` next to the checkpoint. One
+  process evaluates several checkpoints on one env: a tuple of ``--checkpoint-file``
+  paths, or ``--run-dir`` for every ``model_<it>.pt`` of a run that has no results
+  JSON yet (``--overwrite True``: all of them); ``--watch True`` also evaluates each
+  checkpoint the training writes, until its process (``--pid``) has exited. The JSON
+  records the checkpoint's iteration, file time and the run's training time, the
+  git commit of the evaluating code with a dirty flag, and the robot's collision
+  setting.
 - Added local logging without WandB (``mjlab.rl.local_log_writer``: TensorBoard
-  events, ``metrics.csv`` and ``curves.png`` in the run dir; ``--logger local`` is
-  the default) and removed the WandB options, uploads and dependency.
+  events, ``metrics.csv`` with the training wall-clock per logged iteration and
+  ``curves.png`` in the run dir; ``--logger local`` is the default) and removed the
+  WandB options, uploads and dependency.
 - ``csv_to_npz`` writes a local npz and takes ``--atol`` / ``--rtol`` for its
   velocity self-check.
 - Added a ``cu126`` extra (``uv sync --extra cu126``) that installs torch built for

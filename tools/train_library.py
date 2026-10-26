@@ -21,12 +21,18 @@ Evaluate: the paper's library protocol (each clip once from frame 0, in waves of
 most --num-envs clips) on the run's training library ->
 <run dir>/eval_library_model_<it>.json, and a
 one-line summary (normalised return per clip length and per survived step, each as
-mean over clips and frame-weighted; failed clips). Play headless (no viewer): one
-clip of the run's library, records <run dir>/videos/play/rl-video-step-0.mp4
-(overwritten by the next play of that run), one clip pass by default. Both default to
-the newest run under the log root and its last checkpoint:
+mean over clips and frame-weighted; failed clips), for --checkpoint, else for every
+checkpoint of the run dir (default: the newest run) that has no JSON yet
+(``-- --overwrite True``: every one), in one process. ``--watch`` also evaluates
+each checkpoint the training writes, until the training process --pid has exited
+(it first waits for the run's params/env.yaml, written once the training env is
+built).
+Play headless (no viewer): one clip of the run's library, records
+<run dir>/videos/play/rl-video-step-0.mp4 (overwritten by the next play of that run),
+one clip pass by default; it defaults to the newest run and its last checkpoint:
 
     $PY tools/train_library.py --eval [--run-dir DIR | --checkpoint FILE]
+    $PY tools/train_library.py --eval --watch --run-dir DIR --pid TRAIN_PID
     $PY tools/train_library.py --play --clip walk1_subject1 [--run-dir DIR] \\
         [--checkpoint FILE] [--video-length N]
 
@@ -49,6 +55,7 @@ import os
 import re
 import shlex
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -147,18 +154,31 @@ def latest_checkpoint(run_dir: Path) -> Path:
   return max(checkpoints, key=lambda p: int(p.stem.split("_")[1]))
 
 
+def resolve_run_dir(args: argparse.Namespace) -> Path:
+  """``args.run_dir``, else the newest run under ``args.log_root``."""
+  if args.run_dir is not None:
+    return args.run_dir.resolve()
+  runs = sorted(p for p in args.log_root.iterdir() if p.is_dir())  # timestamped
+  if not runs:
+    raise FileNotFoundError(f"no runs under {args.log_root}")
+  return runs[-1]
+
+
 def resolve_checkpoint(args: argparse.Namespace) -> Path:
-  """``args.checkpoint``, else the last checkpoint of ``args.run_dir``, else of the
-  newest run under ``args.log_root``."""
+  """``args.checkpoint``, else the last checkpoint of ``resolve_run_dir(args)``."""
   if args.checkpoint is not None:
-    return args.checkpoint
-  run_dir = args.run_dir
-  if run_dir is None:
-    runs = sorted(p for p in args.log_root.iterdir() if p.is_dir())  # timestamped
-    if not runs:
-      raise FileNotFoundError(f"no runs under {args.log_root}")
-    run_dir = runs[-1]
-  return latest_checkpoint(run_dir)
+    return args.checkpoint.resolve()
+  return latest_checkpoint(resolve_run_dir(args))
+
+
+def wait_for_params(run_dir: Path, pid: int) -> None:
+  """Wait until mjlab has written ``run_dir/params/env.yaml`` (once the training env
+  is built: seconds on LAFAN1, 7-10 min on BONES-SEED) while process ``pid`` runs."""
+  params = run_dir / "params" / "env.yaml"
+  while not params.is_file():
+    if not Path(f"/proc/{pid}").exists():
+      raise SystemExit(f"[train_library] process {pid} ended before writing {params}")
+    time.sleep(10)
 
 
 def run_library(run_dir: Path, motions_dir: Path) -> list[Path]:
@@ -204,7 +224,9 @@ def main() -> None:
     "--play", action="store_true", help="headless video of a checkpoint on one --clip"
   )
   mode.add_argument(
-    "--eval", action="store_true", help="library metrics JSON of a checkpoint"
+    "--eval",
+    action="store_true",
+    help="library metrics JSON of --checkpoint, else of every checkpoint of the run",
   )
   parser.add_argument("--gpu", type=int, default=0)
   parser.add_argument("--iters", type=int, help="training iterations (training)")
@@ -241,6 +263,12 @@ def main() -> None:
   parser.add_argument(
     "--video-length", type=int, help="play: steps recorded (default: one clip pass)"
   )
+  parser.add_argument(
+    "--watch",
+    action="store_true",
+    help="eval: also each checkpoint the training of --run-dir writes, until it ends",
+  )
+  parser.add_argument("--pid", type=int, help="eval --watch: the training process")
   parser.add_argument(
     "--print-cmd", action="store_true", help="print the mjlab command and exit"
   )
@@ -291,11 +319,25 @@ def main() -> None:
   else:
     if args.clips is not None:
       parser.error("--clips is for training; play/eval use the run's training library")
-    checkpoint = resolve_checkpoint(args).resolve()
-    library = run_library(checkpoint.parent, motions_dir)
+    if args.watch and (
+      not args.eval or args.run_dir is None or args.checkpoint is not None
+    ):
+      parser.error("--watch needs --eval and --run-dir, no --checkpoint")
+    if args.pid is not None and not args.watch:
+      parser.error("--pid is for --watch")
+    if args.eval and args.checkpoint is None:
+      run_dir = resolve_run_dir(args)
+      evaluated = ["--run-dir", str(run_dir)]
+    else:
+      checkpoint = resolve_checkpoint(args)
+      run_dir = checkpoint.parent
+      evaluated = ["--checkpoint-file", str(checkpoint)]
+    if args.watch and args.pid is not None and not args.print_cmd:
+      wait_for_params(run_dir, args.pid)
+    library = run_library(run_dir, motions_dir)
     if args.eval:
       # The list goes next to the run's own library files (<run log root>).
-      motion_list = library_list(library, checkpoint.parent.parent)
+      motion_list = library_list(library, run_dir.parent)
       if not args.print_cmd:
         write_library_list(library, motion_list)
       command = [
@@ -303,13 +345,16 @@ def main() -> None:
         "-m",
         "mjlab.tasks.tracking.scripts.evaluate_library",
         TASK,
-        "--checkpoint-file",
-        str(checkpoint),
+        *evaluated,
         "--motion-files",
         str(motion_list),
         "--num-envs",
         str(args.num_envs),
       ]
+      if args.watch:
+        command += ["--watch", "True"]
+      if args.pid is not None:
+        command += ["--pid", str(args.pid)]
     else:
       clips = {path.stem: path for path in library}
       if args.clip not in clips:

@@ -1,9 +1,14 @@
-"""Evaluation tooling: training time per checkpoint and tools/report_groups.py."""
+"""Evaluation tooling: training time per checkpoint, the checkpoints to evaluate
+(skip, overwrite, watch) and tools/report_groups.py."""
 
 import csv
 import importlib
 import json
+import os
+import subprocess
 import sys
+import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -13,7 +18,10 @@ from mjlab.tasks.tracking.scripts.evaluate_library import (
   ITERATION_TIMES,
   EvaluateLibraryConfig,
   checkpoint_files,
+  results_json,
+  training_running,
   training_seconds,
+  watched_checkpoints,
 )
 
 TOOLS = Path(__file__).resolve().parents[1] / "tools"
@@ -55,6 +63,53 @@ def test_training_seconds(tmp_path: Path) -> None:
   ]
   with pytest.raises(ValueError):
     checkpoint_files(EvaluateLibraryConfig(motion_files="library.txt"))
+
+
+def test_skip_overwrite_and_watch(tmp_path: Path) -> None:
+  """--run-dir skips checkpoints that have a results JSON unless --overwrite; --watch
+  yields the pending ones, then each new one once settled while the training runs,
+  and ends after the training process has exited."""
+  run = tmp_path / "run"
+  run.mkdir()
+  old = time.time() - 3600
+  for iteration in (2000, 4000):
+    (run / f"model_{iteration}.pt").touch()
+    os.utime(run / f"model_{iteration}.pt", (old, old))
+  results_json(run / "model_2000.pt").write_text("{}")
+  cfg = EvaluateLibraryConfig(motion_files="library.txt", run_dir=str(run))
+  assert [path.name for path in checkpoint_files(cfg)] == ["model_4000.pt"]
+  assert [path.name for path in checkpoint_files(replace(cfg, overwrite=True))] == [
+    "model_2000.pt",
+    "model_4000.pt",
+  ]
+  with pytest.raises(ValueError):
+    checkpoint_files(replace(cfg, run_dir=None, checkpoint_file="a.pt", watch=True))
+
+  trainer = subprocess.Popen(["sleep", "60"])
+  watched = watched_checkpoints(
+    replace(cfg, watch=True, pid=trainer.pid, poll_seconds=0.01)
+  )
+  first = next(watched)
+  assert first.name == "model_4000.pt"
+  results_json(first).write_text("{}")
+  (run / "model_6000.pt").touch()  # still being written while the training runs
+  (run / "model_8000.pt").touch()
+  os.utime(run / "model_8000.pt", (old, old))
+  assert next(watched).name == "model_8000.pt"
+  trainer.kill()
+  trainer.wait()
+  assert [path.name for path in watched] == ["model_6000.pt"]
+
+  # Without a pid: running while a model_<it>.pt or metrics.csv (none yet: the start
+  # of the watch) is younger than stale_minutes.
+  fresh_run = tmp_path / "fresh"
+  fresh_run.mkdir()
+  assert training_running(fresh_run, None, 1.0, since=time.time())
+  assert not training_running(fresh_run, None, 1.0, since=old)
+  (fresh_run / "metrics.csv").touch()
+  assert training_running(fresh_run, None, 1.0, since=old)
+  os.utime(fresh_run / "metrics.csv", (old, old))
+  assert not training_running(fresh_run, None, 1.0, since=time.time())
 
 
 def fake_eval(iteration: int, failed: set[str], seconds: float) -> dict:

@@ -22,10 +22,14 @@ compact) holds the aggregates and one record per clip.
 
 Several checkpoints are evaluated in one process, on one env (the library loads once):
 a tuple of ``--checkpoint-file`` paths, or ``--run-dir`` for every ``model_<it>.pt`` of
-a run. Each gets its own JSON, which also records the checkpoint's iteration, file
-mtime and the run's training wall-clock at that iteration (``training_seconds``), and
-in its ``provenance`` the git commit of the evaluating code (with a ``dirty`` flag) and
-the robot's collision setting in the play cfg (``self_collision``, ``collisions``).
+a run that has no results JSON yet (``--overwrite``: every one). ``--watch`` keeps
+polling the run dir while it trains and evaluates each new checkpoint, until the
+training has ended (``--pid`` exited, or without it no new checkpoint or metrics.csv
+row for ``--stale-minutes``) and every checkpoint is evaluated. Each checkpoint gets
+its own JSON, which also records the checkpoint's iteration, file mtime and the run's
+training wall-clock at that iteration (``training_seconds``), and in its
+``provenance`` the git commit of the evaluating code (with a ``dirty`` flag) and the
+robot's collision setting in the play cfg (``self_collision``, ``collisions``).
 
   python -m mjlab.tasks.tracking.scripts.evaluate_library <task> \
     --checkpoint-file <run>/model_4000.pt --motion-files "('a.npz', 'b.npz')"
@@ -35,6 +39,9 @@ the robot's collision setting in the play cfg (``self_collision``, ``collisions`
   # every checkpoint of a run (or --checkpoint-file "('<run>/a.pt', '<run>/b.pt')")
   python -m mjlab.tasks.tracking.scripts.evaluate_library <task> \
     --run-dir <run> --motion-files library.txt
+  # and every checkpoint the training process <pid> writes until it ends
+  python -m mjlab.tasks.tracking.scripts.evaluate_library <task> \
+    --run-dir <run> --motion-files library.txt --watch True --pid <pid>
 """
 
 from __future__ import annotations
@@ -45,7 +52,7 @@ import re
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -68,6 +75,9 @@ MAX_PRINTED_FAILURES = 50
 CHECKPOINT_NAME = re.compile(r"model_(\d+)\.pt")
 # Training time of runs whose metrics.csv predates the TRAINING_SECONDS column.
 ITERATION_TIMES = "Perf/collection_time + Perf/learning_time"
+# --watch reads a checkpoint of a running training once its file is this old (s):
+# torch.save writes it in place.
+SETTLE_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -82,8 +92,20 @@ class EvaluateLibraryConfig:
   """Local checkpoint to evaluate (e.g. '<run_dir>/model_4000.pt'), or a Python tuple
   literal of several, evaluated in that order."""
   run_dir: str | None = None
-  """Evaluate every 'model_<it>.pt' of this run directory, in iteration order, instead
-  of --checkpoint-file."""
+  """Evaluate every 'model_<it>.pt' of this run directory that has no results JSON yet,
+  in iteration order, instead of --checkpoint-file."""
+  overwrite: bool = False
+  """With --run-dir: also evaluate the checkpoints that already have a results JSON."""
+  watch: bool = False
+  """With --run-dir: keep evaluating the checkpoints the training writes, until it
+  has ended and every checkpoint is evaluated."""
+  pid: int | None = None
+  """--watch: the training process; the training has ended when it exits."""
+  stale_minutes: float = 30.0
+  """--watch without --pid: the training has ended when no model_<it>.pt or
+  metrics.csv of the run (else the watch itself) is younger than this."""
+  poll_seconds: float = 60.0
+  """--watch: seconds between two looks at the run dir."""
   num_envs: int = 4096
   """Parallel envs; more clips than this are played in waves."""
   device: str | None = None
@@ -233,9 +255,16 @@ def evaluate_library(
   }
 
 
+def results_json(checkpoint: Path) -> Path:
+  """The default results JSON of ``checkpoint``: ``eval_library_<stem>.json`` next to
+  it."""
+  return checkpoint.with_name(f"eval_library_{checkpoint.stem}.json")
+
+
 def checkpoint_files(cfg: EvaluateLibraryConfig) -> list[Path]:
   """The checkpoints of ``cfg``: every ``model_<it>.pt`` of ``cfg.run_dir`` by
-  iteration, else ``cfg.checkpoint_file`` in the given order."""
+  iteration without those that have a results JSON (unless ``cfg.overwrite``), else
+  ``cfg.checkpoint_file`` in the given order."""
   given = (
     (cfg.checkpoint_file,)
     if isinstance(cfg.checkpoint_file, str)
@@ -244,15 +273,62 @@ def checkpoint_files(cfg: EvaluateLibraryConfig) -> list[Path]:
   if (cfg.run_dir is None) == (not given):
     raise ValueError("Give either --checkpoint-file or --run-dir.")
   if cfg.run_dir is None:
+    if cfg.watch:
+      raise ValueError("--watch needs --run-dir.")
     return [Path(path) for path in given]
   found = {
     int(match.group(1)): path
     for path in Path(cfg.run_dir).glob("model_*.pt")
     if (match := CHECKPOINT_NAME.fullmatch(path.name))
   }
-  if not found:
+  if not found and not cfg.watch:
     raise FileNotFoundError(f"No model_<it>.pt in {cfg.run_dir}")
-  return [found[iteration] for iteration in sorted(found)]
+  return [
+    found[iteration]
+    for iteration in sorted(found)
+    if cfg.overwrite or not results_json(found[iteration]).is_file()
+  ]
+
+
+def training_running(
+  run_dir: Path, pid: int | None, stale_minutes: float, since: float
+) -> bool:
+  """Whether the training of ``run_dir`` still runs: process ``pid`` exists, or
+  without ``pid``, the newest ``model_<it>.pt`` or ``metrics.csv`` of the run (none
+  yet: the time ``since``) is younger than ``stale_minutes``."""
+  if pid is not None:
+    return Path(f"/proc/{pid}").exists()
+  outputs = [*run_dir.glob("model_*.pt"), run_dir / "metrics.csv"]
+  newest = max(
+    (path.stat().st_mtime for path in outputs if path.is_file()), default=since
+  )
+  return time.time() - newest < stale_minutes * 60
+
+
+def watched_checkpoints(cfg: EvaluateLibraryConfig) -> Iterator[Path]:
+  """``--watch``: the checkpoints of ``checkpoint_files(cfg)``, then each one the
+  training writes later (once ``SETTLE_SECONDS`` old), polled every
+  ``cfg.poll_seconds``; ends when the training has ended (``training_running``) and
+  every checkpoint was yielded. The caller writes a checkpoint's JSON before taking
+  the next one."""
+  assert cfg.run_dir is not None
+  start = time.time()
+  yielded: set[Path] = set()
+  while True:
+    running = training_running(Path(cfg.run_dir), cfg.pid, cfg.stale_minutes, start)
+    settled = time.time() - SETTLE_SECONDS
+    ready = [
+      path
+      for path in checkpoint_files(cfg)
+      if path not in yielded and (not running or path.stat().st_mtime < settled)
+    ]
+    if not ready and not running:
+      return
+    if not ready:
+      time.sleep(cfg.poll_seconds)
+    for path in ready:
+      yielded.add(path)
+      yield path
 
 
 def training_seconds(checkpoint: Path) -> tuple[float | None, str | None]:
@@ -319,13 +395,20 @@ def run_evaluate_library(
   task_id: str, cfg: EvaluateLibraryConfig
 ) -> list[dict[str, Any]]:
   """Load the library once and evaluate each checkpoint of ``cfg`` on it with the
-  task's runner; return the results in checkpoint order."""
+  task's runner (``--watch``: also those the training writes later); return the
+  results in evaluation order."""
   configure_torch_backends()
   source = source_commit()
   device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
   checkpoints = checkpoint_files(cfg)
-  if cfg.output_json is not None and len(checkpoints) > 1:
+  if cfg.output_json is not None and (len(checkpoints) > 1 or cfg.watch):
     raise ValueError("--output-json needs a single checkpoint.")
+  if not checkpoints and not cfg.watch:
+    print(
+      f"[INFO] every checkpoint of {cfg.run_dir} has its results JSON "
+      "(--overwrite True evaluates them again)"
+    )
+    return []
   motion_files = (
     (cfg.motion_files,) if isinstance(cfg.motion_files, str) else cfg.motion_files
   )
@@ -357,7 +440,8 @@ def run_evaluate_library(
   }
 
   results = []
-  for checkpoint in checkpoints:
+  for checkpoint in watched_checkpoints(cfg) if cfg.watch else checkpoints:
+    print(f"[INFO] {time.strftime('%H:%M:%S')} evaluating {checkpoint}", flush=True)
     runner.load(
       str(checkpoint), load_cfg={"actor": True}, strict=True, map_location=device
     )
@@ -378,9 +462,7 @@ def run_evaluate_library(
         **collisions,
       },
     }
-    output = Path(
-      cfg.output_json or checkpoint.with_name(f"eval_library_{checkpoint.stem}.json")
-    )
+    output = Path(cfg.output_json or results_json(checkpoint))
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result))
     print(

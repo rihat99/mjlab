@@ -8,7 +8,7 @@ HOST``). Ctrl-C stops it. Anything after ``--`` goes to ``play`` unchanged, e.g.
 ``-- --device cpu``:
 
     PY=<repo>/.venv/bin/python
-    $PY tools/view.py --run-dir checkpoints/seed100k_margin10 \\
+    $PY tools/view.py --run-dir runs/seed/<run> \\
         --clip side_roll_R_001__A304_M
     $PY tools/view.py --checkpoint runs/lafan/<run>/model_14000.pt --clip dance1_subject3
 
@@ -25,7 +25,7 @@ through viser in a headless Chromium on ``--gpu``. Writes ``videos/<clip>/``:
 - ``rollout.npz``: the whole rollout (per 200 Hz substep ``qpos``, ``ctrl``; per
   policy step ``frame``, ``reward``, ``ref_qpos``) and the window.
 
-    $PY tools/view.py --run-dir checkpoints/seed100k_margin10 \\
+    $PY tools/view.py --run-dir runs/seed/<run> \\
         --clip side_roll_R_001__A304_M --video [--ghost targets] [--window-start 100]
 
 The browser is Playwright's Chromium headless shell (``npx playwright install
