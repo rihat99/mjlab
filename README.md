@@ -197,8 +197,8 @@ or without root.
 ## Trained policy
 
 `checkpoints/seed100k_margin10/` was trained with the code before this branch's
-method changes and no longer loads (actor input 990, now 930; critic input 831, now
-840; a checkout of 12c90fb65 still evaluates it). A policy retrained with the current
+method changes and no longer loads (critic input 831, now 840; a checkout of
+12c90fb65 still evaluates it). A policy retrained with the current
 code on the 129,951 kept BONES-SEED clips replaces it:
 
 **TBD (SEED retrain): `checkpoints/<name>/model_<it>.pt`, <it> iterations (4096 envs,
@@ -230,7 +230,11 @@ library from the motions dir instead (`manifest.json`'s kept clips).
   everything at 1.0 in the play config. The sim context ξ (Table A.3) is stored with
   every replay transition: friction and encoder bias are resampled at every reset,
   the torso CoM offset once per env. The actor frame is Table A.1's proprioception
-  (93 per frame, 10-frame history); the goal holds the 10 reference frames (root
+  plus the 6D anchor-orientation error to the current reference frame (99 per frame,
+  10-frame history): our goal is written in the reference heading frame, so without
+  that term the policy cannot see its heading error (on LAFAN at 14k: 0.58 return and
+  49 degrees of yaw drift at 20 s, against 0.80 and 1.4 degrees with it). The goal
+  holds the 10 reference frames (root
   position delta, 6D rotation, local root velocities, joint positions, 0.1 x joint
   velocities, in the heading frame of the current reference frame; 730); no robot
   position enters either. The critic also sees the reference root pose in the robot
