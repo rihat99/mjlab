@@ -121,7 +121,8 @@ class SuperMimic:
     # The largest attainable |return|, max_step_reward / (1 - gamma) (10 for tracking):
     # critic values are clamped to it wherever they serve as an estimate (lambda-return
     # targets, the policy's and the reset sampler's bootstraps); the regression fits
-    # the raw output. Unclamped, V drifted above it at clip ends and diverged.
+    # the raw output. The clamp keeps an overestimate from feeding back into the
+    # bootstrapped targets.
     self.value_limit = iface.max_step_reward / (1.0 - policy_cfg.gamma)
     self.state = FloatingBaseState(iface.nq)
     assert self.state.state_dim == iface.state_dim
@@ -227,9 +228,7 @@ class SuperMimic:
       for i in range(cfg.batches_per_update)
     ]
     for windows in batches:
-      loss, last_error = self._world_model_loss(
-        self.world_model, self.iface, windows, windows["context"]
-      )
+      loss, last_error = self._world_model_loss(self.world_model, self.iface, windows)
       self.world_model_optimizer.zero_grad(set_to_none=True)
       loss.backward()
       grad_norm = nn.utils.clip_grad_norm_(

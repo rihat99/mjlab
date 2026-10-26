@@ -17,6 +17,7 @@ from mjlab.tasks.tracking.mdp.commands import MotionCommand, MotionLoader
 from mjlab.tasks.tracking.scripts.evaluate_library import (
   evaluate_library,
   make_library_env,
+  self_collision,
 )
 
 TASK_ID = "Mjlab-Tracking-Flat-Unitree-G1-SuperMimic"
@@ -97,7 +98,7 @@ def test_bins_are_per_clip(env: ManagerBasedRlEnv) -> None:
   assert bins_per_clip == [n // 50 + 1 for n in CLIP_LENGTHS]
   frames = torch.arange(num_frames, device=env.device)
   assert torch.equal(
-    command.bin_of(frames), torch.searchsorted(end, frames, right=True)
+    command.bin_of_frame[frames], torch.searchsorted(end, frames, right=True)
   )
 
 
@@ -119,6 +120,9 @@ def test_return_sampling(env: ManagerBasedRlEnv) -> None:
   assert command.cfg.sampling_mode == "return"
   num_bins = command.bin_count
   assert sampler.bin_count == num_bins
+  # With Nb <= softmax_cap the cap (softmax_cap / Nb of the softmax mass per bin) is
+  # at least 1 and never binds: the expected distributions below are uncapped.
+  assert num_bins <= command.cfg.softmax_cap
   probs = sampler.probabilities()
   torch.testing.assert_close(probs, torch.full_like(probs, 1 / num_bins))
 
@@ -150,7 +154,7 @@ def test_return_sampling(env: ManagerBasedRlEnv) -> None:
     starts.append(command.time_steps.clone())
   starts = torch.cat(starts)
   assert (starts < command.clip_end_of(starts) - 1).all()
-  hard_share = (command.bin_of(starts) == hard_bin).float().mean().item()
+  hard_share = (command.bin_of_frame[starts] == hard_bin).float().mean().item()
   assert abs(hard_share - (0.6 / num_bins + 0.4)) < 0.05
 
   sampler.bin_returns.zero_()
@@ -253,6 +257,7 @@ def test_evaluate_library_zero_policy(
   def evaluate(motion_file: tuple[str, ...], num_envs: int | None = None) -> dict:
     env = make_library_env(TASK_ID, motion_file, get_test_device(), num_envs=num_envs)
     try:
+      assert self_collision(env.unwrapped, "robot")  # recorded in the provenance
 
       def zero_policy(obs) -> torch.Tensor:
         return torch.zeros(env.num_envs, env.num_actions, device=env.device)

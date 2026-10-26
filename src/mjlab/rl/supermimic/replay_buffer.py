@@ -125,8 +125,7 @@ class ReplayBuffer:
     Returns:
       s0 (B, S) start state; actions (B, k, A) executed actions; targets (B, k, S)
       states reached by each transition; valid (B, k) float (1 up to and including
-      the first done); context (B, C) the window's sim context (one episode);
-      env_idx (B,) int64.
+      the first done); context (B, C) the window's sim context (one episode).
     """
     assert self.size >= k + 1, "replay buffer holds fewer than k + 1 steps"
     offsets = torch.arange(k, device=self.device)
@@ -149,7 +148,6 @@ class ReplayBuffer:
       "targets": self._next_state(rows, env_k),
       "valid": valid,
       "context": self.context[rows[:, 0], env],
-      "env_idx": env,
     }
 
   def sample_seeds(
@@ -170,13 +168,12 @@ class ReplayBuffer:
 
     Returns:
       s0 (B, S); frame0 (B,) int64; context (B, C) the sim context of the seed's
-      episode (its history rows share it); env_idx (B,) int64; state_hist
-      (B, history, S) oldest first, ending at s0; prev_action_hist (B, history, A) the
-      action executed before each history state (zeros at episode start) and
-      frame_hist (B, history) the frame shown with it, so frame m of the observation
-      history is observation(state_hist[:, m], prev_action_hist[:, m], context,
-      frame_hist[:, m]); a_prev (B, A) the action executed before s0
-      (= prev_action_hist[:, -1]).
+      episode (its history rows share it); state_hist (B, history, S) oldest first,
+      ending at s0; prev_action_hist (B, history, A) the action executed before each
+      history state (zeros at episode start) and frame_hist (B, history) the frame
+      shown with it, so frame m of the observation history is
+      observation(state_hist[:, m], prev_action_hist[:, m], context, frame_hist[:, m]);
+      a_prev (B, A) the action executed before s0 (= prev_action_hist[:, -1]).
     """
 
     def is_valid(age: torch.Tensor, env: torch.Tensor) -> torch.Tensor:
@@ -205,7 +202,6 @@ class ReplayBuffer:
       "s0": self.state[rows, env],
       "frame0": self.frame[rows, env],
       "context": self.context[rows, env],
-      "env_idx": env,
       "state_hist": self.state[self._rows(hist_age), env_h],
       "prev_action_hist": prev_action_hist,
       "frame_hist": self.frame[self._rows(hist_age), env_h],
@@ -215,8 +211,7 @@ class ReplayBuffer:
   def iter_transitions(self, chunk_size: int) -> Iterator[dict[str, torch.Tensor]]:
     """Yield every stored transition whose next state is known, in chunks.
 
-    Each chunk has state (M, S), action (M, A), next_state (M, S), context (M, C),
-    env_idx (M,).
+    Each chunk has state (M, S), action (M, A), next_state (M, S), context (M, C).
     """
     num_ages = self.size - 1
     ages = torch.arange(num_ages, device=self.device).repeat_interleave(self.num_envs)
@@ -229,5 +224,4 @@ class ReplayBuffer:
         "action": self.action[rows, env],
         "next_state": self._next_state(rows, env),
         "context": self.context[rows, env],
-        "env_idx": env,
       }

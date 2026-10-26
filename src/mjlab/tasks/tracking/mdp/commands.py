@@ -346,10 +346,6 @@ class MotionCommand(CommandTerm):
     """Exclusive end frame of the clip each frame belongs to: (B,) -> (B,)."""
     return self.motion.clip_end[self.motion.clip_id_of_frame[frames]]
 
-  def bin_of(self, frames: torch.Tensor) -> torch.Tensor:
-    """Sampling bin of each frame: (B,) -> (B,)."""
-    return self.bin_of_frame[frames]
-
   def future_frames(self, frames: torch.Tensor, num_frames: int) -> torch.Tensor:
     """Frames ``frames .. frames + num_frames - 1``, clamped to the clip's last frame.
 

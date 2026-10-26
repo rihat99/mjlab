@@ -23,7 +23,9 @@ compact) holds the aggregates and one record per clip.
 Several checkpoints are evaluated in one process, on one env (the library loads once):
 a tuple of ``--checkpoint-file`` paths, or ``--run-dir`` for every ``model_<it>.pt`` of
 a run. Each gets its own JSON, which also records the checkpoint's iteration, file
-mtime and the run's training wall-clock at that iteration (``training_seconds``).
+mtime and the run's training wall-clock at that iteration (``training_seconds``), and
+in its ``provenance`` the git commit of the evaluating code (with a ``dirty`` flag) and
+the robot's collision setting in the play cfg (``self_collision``, ``collisions``).
 
   python -m mjlab.tasks.tracking.scripts.evaluate_library <task> \
     --checkpoint-file <run>/model_4000.pt --motion-files "('a.npz', 'b.npz')"
@@ -40,6 +42,7 @@ from __future__ import annotations
 import csv
 import json
 import re
+import subprocess
 import sys
 import time
 from collections.abc import Callable, Sequence
@@ -282,12 +285,43 @@ def training_seconds(checkpoint: Path) -> tuple[float | None, str | None]:
   return iteration_times, ITERATION_TIMES
 
 
+def source_commit() -> dict[str, str | bool | None]:
+  """``commit``: HEAD of the git checkout this file runs from; ``dirty``: whether its
+  tracked files differ from HEAD. Both None when no checkout tracks this file (an
+  export or an installed package)."""
+  here = Path(__file__).resolve()
+
+  def git(*args: str) -> subprocess.CompletedProcess[str]:
+    command = ["git", "-C", str(here.parent), *args]
+    return subprocess.run(command, capture_output=True, text=True)
+
+  if git("ls-files", "--error-unmatch", here.name).returncode != 0:
+    return {"commit": None, "dirty": None}
+  status = git("status", "--porcelain", "--untracked-files=no")
+  return {
+    "commit": git("rev-parse", "HEAD").stdout.strip(),
+    "dirty": bool(status.stdout.strip()),
+  }
+
+
+def self_collision(env: ManagerBasedRlEnv, entity_name: str) -> bool:
+  """Whether two geoms of the entity on different bodies pass MuJoCo's contype /
+  conaffinity filter in the compiled model (parent-child and excluded pairs aside)."""
+  model = env.sim.mj_model
+  geoms = env.scene[entity_name].indexing.geom_ids.cpu().numpy()
+  contype, conaffinity = model.geom_contype[geoms], model.geom_conaffinity[geoms]
+  bodies = model.geom_bodyid[geoms]
+  can_touch = (contype[:, None] & conaffinity[None, :]) != 0
+  return bool((can_touch & (bodies[:, None] != bodies[None, :])).any())
+
+
 def run_evaluate_library(
   task_id: str, cfg: EvaluateLibraryConfig
 ) -> list[dict[str, Any]]:
   """Load the library once and evaluate each checkpoint of ``cfg`` on it with the
   task's runner; return the results in checkpoint order."""
   configure_torch_backends()
+  source = source_commit()
   device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
   checkpoints = checkpoint_files(cfg)
   if cfg.output_json is not None and len(checkpoints) > 1:
@@ -312,6 +346,15 @@ def run_evaluate_library(
   )
   runner_cls = load_runner_cls(task_id) or MjlabOnPolicyRunner
   runner = runner_cls(env, asdict(agent_cfg), device=device)
+  unwrapped = env.unwrapped
+  command_cfg = cast(MotionCommandCfg, unwrapped.cfg.commands["motion"])
+  entity_name = command_cfg.entity_name
+  collisions = {
+    "self_collision": self_collision(unwrapped, entity_name),
+    "collisions": [
+      asdict(c) for c in unwrapped.cfg.scene.entities[entity_name].collisions
+    ],
+  }
 
   results = []
   for checkpoint in checkpoints:
@@ -331,6 +374,8 @@ def run_evaluate_library(
         "task": task_id,
         "checkpoint_file": str(checkpoint.resolve()),
         "motion_files": [str(Path(f).resolve()) for f in motion_files],
+        **source,
+        **collisions,
       },
     }
     output = Path(

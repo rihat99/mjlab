@@ -137,7 +137,7 @@ class ModelInterface(Protocol):
       frame: (B,) int64 frame the goal of ``s`` is computed at.
       features: (B, feature_dim) ``invariant_features(s)``.
       goal: (B, goal_dim) ``goal(s, frame)``.
-      context: (B, context_dim) normalised sim context of each row's env.
+      context: (B, context_dim) normalised sim context of each row's episode.
     """
     ...
 

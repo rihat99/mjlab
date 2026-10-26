@@ -98,7 +98,6 @@ class TrackingModelInterface:
     self.state_dim = self._state.state_dim
     self.feature_dim = self._state.feature_dim
     self.action_dim = env.action_manager.total_action_dim
-    self.context_dim = 1 + self.nq + 3
 
     prefix = f"{command.cfg.entity_name}/"
     self._kinematics = TorchKinematics(
@@ -246,6 +245,15 @@ class TrackingModelInterface:
     at reset (per episode). The play cfg has no randomization (fixed friction, no
     bias, no CoM offset): no context then.
     """
+    # The one definition of xi's layout: context_normalized writes each part to its
+    # slice, actor_observation reads the encoder bias back from its slice.
+    nq = self.nq
+    self._context_slices = {
+      "friction": slice(0, 1),
+      "encoder_bias": slice(1, 1 + nq),
+      "com_offset": slice(1 + nq, 4 + nq),
+    }
+    self.context_dim = 4 + nq
     env = self._env
     events = env.event_manager
     self._has_context = False
@@ -311,14 +319,15 @@ class TrackingModelInterface:
     env = self._env
     friction = env.sim.model.geom_friction[:, self._friction_geom, 0]
     offset = env.sim.model.body_ipos[:, self._com_body] - self._default_com
-    parts = (
-      (friction.unsqueeze(-1), self._friction_range),
-      (self._robot.data.encoder_bias, self._bias_range),
-      (offset, self._com_range),
-    )
-    return torch.cat(
-      [(value - center) / half for value, (center, half) in parts], dim=-1
-    ).float()
+    parts = {
+      "friction": (friction.unsqueeze(-1), self._friction_range),
+      "encoder_bias": (self._robot.data.encoder_bias, self._bias_range),
+      "com_offset": (offset, self._com_range),
+    }
+    context = torch.empty(env.num_envs, self.context_dim, device=self.device)
+    for name, (value, (center, half)) in parts.items():
+      context[:, self._context_slices[name]] = (value - center) / half
+    return context
 
   # Heads on (imagined) states.
 
@@ -341,7 +350,7 @@ class TrackingModelInterface:
     del frame
     _, quat, _, ang_vel_w, q, qd = self._state.split(s)
     center, half = self._bias_range
-    bias = center + half * context[:, 1 : 1 + self.nq]
+    bias = center + half * context[:, self._context_slices["encoder_bias"]]
     return kernels.proprio_observation(
       q,
       qd,

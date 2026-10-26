@@ -176,7 +176,6 @@ def world_model_loss(
   model: WorldModel,
   iface: ModelInterface,
   windows: dict[str, torch.Tensor],
-  context: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
   """k-step autoregressive loss of the world model on replay windows (Eq. 1).
 
@@ -196,13 +195,13 @@ def world_model_loss(
     model: the world model.
     iface: the task's model interface (invariant features).
     windows: output of ``ReplayBuffer.sample_windows``.
-    context: (B, C) normalised sim context of the windows (``windows["context"]``).
 
   Returns:
     state loss (), mean e^2 at the last window step ().
   """
   s_hat = windows["s0"]
   valid = windows["valid"]
+  context = windows["context"]
   prev_states, increments = [], []
   for m in range(valid.shape[1]):
     features = iface.invariant_features(s_hat)

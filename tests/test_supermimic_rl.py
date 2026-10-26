@@ -431,7 +431,7 @@ def test_replay_buffer_windows_and_seeds_around_dones_and_wrap():
   windows = buffer.sample_windows(2000, k=2)
   starts = set()
   for i in range(2000):
-    t, env = int(windows["s0"][i, 0]), int(windows["env_idx"][i])
+    t, env = int(windows["s0"][i, 0]), int(windows["s0"][i, 1])
     starts.add((env, t))
     for m in range(2):
       assert windows["targets"][i, m].tolist() == next_state(t + m, env)
@@ -443,7 +443,7 @@ def test_replay_buffer_windows_and_seeds_around_dones_and_wrap():
   seeds = buffer.sample_seeds(2000, history=3, horizon=2, clip_end_fn=lambda f: f + 100)
   starts = set()
   for i in range(2000):
-    t, env = int(seeds["s0"][i, 0]), int(seeds["env_idx"][i])
+    t, env = int(seeds["s0"][i, 0]), int(seeds["s0"][i, 1])
     starts.add((env, t))
     ep = t if env == 1 else t - 5
     hist = [max(t - back, t - ep) for back in (2, 1, 0)]
@@ -469,11 +469,10 @@ def test_world_model_k_step_loss_decreases(device):
   buffer = _fill_buffer(env, 60)
   alg.fit_world_model_statistics(buffer)
   windows = buffer.sample_windows(1024, wm_cfg.window_k)
-  context = windows["context"]
 
   def state_loss() -> float:
     with torch.no_grad():
-      loss, _ = world_model_loss(alg.world_model, env.iface, windows, context)
+      loss, _ = world_model_loss(alg.world_model, env.iface, windows)
     return float(loss)
 
   initial = state_loss()
@@ -646,6 +645,51 @@ def test_lambda_returns_hand_computed_h3():
   torch.testing.assert_close(returns(2.5), clamped)
 
 
+def test_bootstrap_values_clamped(device):
+  # A critic that outputs a constant beyond the limit: the reset sampler's value() and
+  # the policy's terminal value see exactly +-value_limit.
+  torch.manual_seed(0)
+  env = _SyntheticEnv(64, device)
+  wm_cfg, policy_cfg, critic_cfg = _small_cfgs()
+  alg = SuperMimic(env.iface, wm_cfg, policy_cfg, critic_cfg, device)
+  buffer = _fill_buffer(env, 40)
+  alg.fit_world_model_statistics(buffer)
+  last = alg.critic.mlp[-1]
+  assert isinstance(last, nn.Linear)
+  nn.init.zeros_(last.weight)
+  limit = alg.value_limit
+
+  horizon = 3
+  seeds = buffer.sample_seeds(16, HISTORY, horizon, env.iface.clip_end)
+  s, frame0 = seeds["s0"], seeds["frame0"]
+  frames = [frame0 + t for t in range(horizon + 1)]
+  heads = [alg.state_heads(s, frame) for frame in frames]
+  zeros = torch.zeros_like(seeds["a_prev"])
+
+  def bootstrapped(constant: float) -> tuple[torch.Tensor, torch.Tensor]:
+    nn.init.constant_(last.bias, constant)
+    with torch.no_grad():
+      loss = alg.policy_objective(
+        [s] * horizon,
+        [zeros] * horizon,
+        [zeros] * horizon,
+        frames[:-1],
+        [features for features, _ in heads],
+        [goal for _, goal in heads],
+        frames[-1],
+        seeds["context"],
+      )[0]
+    return alg.value(s, frame0, seeds["context"]), loss
+
+  for sign in (1.0, -1.0):
+    value, loss = bootstrapped(sign * 100 * limit)
+    at_limit_value, at_limit_loss = bootstrapped(sign * limit)
+    assert torch.equal(value, torch.full_like(value, sign * limit))
+    assert torch.equal(value, at_limit_value) and torch.equal(loss, at_limit_loss)
+  # The terminal value does enter the objective.
+  assert not torch.equal(bootstrapped(0.5 * limit)[1], at_limit_loss)
+
+
 def test_softmax_cap(device):
   # 1000 bins, one hard: the uncapped softmax puts ~1 on it, the cap 50 / 1000.
   num_bins = 1000
@@ -710,6 +754,14 @@ def test_runner_learn_save_load_and_inference(device, tmp_path):
   sampler = env.return_sampler
   assert sampler.past_weight_updates == 30 and sampler.credit_calls > 0
   assert (sampler.bin_returns != 0).any()
+  # The context is read before env.step, which resamples it for the envs it resets:
+  # each row holds its own episode's context, the row that ended the episode too.
+  buffer = runner.buffer
+  assert buffer is not None and buffer.size == buffer.ptr  # no wrap: rows in order
+  continues = buffer.episode_step[1 : buffer.size] > 0
+  same_context = buffer.context[1 : buffer.size] == buffer.context[: buffer.size - 1]
+  assert (~continues).any()
+  assert torch.equal(same_context.all(-1), continues)
   for it in (10, 20, 30):
     assert (tmp_path / f"model_{it}.pt").is_file()
   header = (tmp_path / "metrics.csv").read_text().splitlines()[0].split(",")

@@ -18,6 +18,7 @@ from mjlab.envs import ManagerBasedRlEnv
 from mjlab.managers.metrics_manager import MetricsTermCfg
 from mjlab.managers.recorder_manager import RecorderTerm, RecorderTermCfg
 from mjlab.rl.supermimic import FloatingBaseState
+from mjlab.rl.supermimic.algorithm import _maybe_compile
 from mjlab.tasks.registry import load_env_cfg
 from mjlab.tasks.tracking.mdp import MotionCommandCfg, kernels
 from mjlab.tasks.tracking.mdp.commands import MotionCommand
@@ -227,6 +228,32 @@ def test_critic_root_pose_error_matches_env(rollout) -> None:
     expected = torch.cat((pos_b, ori_b), dim=-1)
     err = max(err, float((x[:, -9:] - expected).abs().max()))
   assert err <= 1e-4
+
+
+def test_compiled_critic_input_matches_eager(rollout) -> None:
+  """The learner's compiled critic_input (FK of the anchor) against the eager one:
+  values and the gradient to the state, in fp32 and under bf16 autocast."""
+  env, iface, steps = rollout
+  if env.device == "cpu":
+    pytest.skip("the learner compiles for CUDA")
+  compiled = _maybe_compile(iface.critic_input, True)
+  s = _stack(steps, "s_post").flatten(0, 1)
+  frame = _stack(steps, "frame_post").flatten()
+  context = _stack(steps, "context_post").flatten(0, 1)
+  weights = torch.linspace(-1.0, 1.0, iface.critic_dim, device=s.device)
+
+  def value_and_grad(fn, autocast: bool) -> tuple[torch.Tensor, torch.Tensor]:
+    x = s.clone().requires_grad_(True)
+    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=autocast):
+      out = fn(x, frame, iface.invariant_features(x), iface.goal(x, frame), context)
+    (grad,) = torch.autograd.grad((out * weights).sum(), x)
+    return out.detach(), grad
+
+  for autocast in (False, True):
+    out, grad = value_and_grad(compiled, autocast)
+    out_eager, grad_eager = value_and_grad(iface.critic_input, autocast)
+    torch.testing.assert_close(out, out_eager, rtol=1e-4, atol=1e-4)
+    torch.testing.assert_close(grad, grad_eager, rtol=1e-4, atol=1e-4)
 
 
 def test_termination_matches_env(rollout, monkeypatch: pytest.MonkeyPatch) -> None:
