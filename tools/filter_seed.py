@@ -5,9 +5,11 @@ feasibility filter (264.56 h). A clip is kept when no stage below flags it.
 
 1. Name filter: case-insensitive substring match on the metadata ``filename`` with
    SONIC's 40 keywords (gear_sonic ``filter_and_copy_bones_data.py``) plus "50cm" and
-   "look_over_fence" (the paper's examples jump_off_50cm, look_over_fence), except
-   ``TRAINED_SONIC_TERMS``: cartwheels, handstands and the kozak dance need no prop, so
-   we keep them (a deviation from the paper, which drops them).
+   "look_over_fence" (the paper's examples jump_off_50cm, look_over_fence) and our
+   "off_wall" (the wall push-off needs a wall) and "inchworm" (the plank's hands sink
+   into the floor), except ``TRAINED_SONIC_TERMS``: cartwheels, handstands and the
+   kozak dance need no prop, so we keep them (a deviation from the paper, which drops
+   them).
 2. Feasibility filter on the 50 Hz npz of ``tools/convert_seed.py``. zmin(t) is the
    lowest body-link origin (``body_pos_w`` z); a foot's height is the smallest
    ``mj_geomDistance`` between its 7 collision capsules and the floor plane.
@@ -16,7 +18,10 @@ feasibility filter (264.56 h). A clip is kept when no stage below flags it.
    - floating feet: both feet > 0.02 m for >= 0.5 s (25 contiguous frames) while the
      pelvis is upright, at standing height and nearly still. The paper gives no gate
      thresholds; these are SuperMimic-Reproduced's: pelvis z-axis world z > 0.9,
-     0.60 m < pelvis z < 0.85 m, pelvis speed < 0.1 m/s, joint speed RMS < 0.5 rad/s.
+     0.60 m < pelvis z < 0.85 m, pelvis speed < 0.1 m/s, joint speed RMS < 0.5 rad/s;
+   - joint speed (ours): a joint moves faster than ``MAX_JOINT_SPEED`` between two
+     consecutive frames, a retargeting spike (|dq| / 0.02 s from ``joint_pos``; the
+     npz's central-difference ``joint_vel`` halves a one-frame spike).
 
 Writes ``<motions-dir>/manifest.json``: a summary (counts per stage and per reason,
 hours, hits per name term, the lower foot's height on gated frames of kept clips) and,
@@ -89,6 +94,8 @@ NAME_TERMS = (
   *(term for term in SONIC_TERMS if term not in TRAINED_SONIC_TERMS),
   "50cm",
   "look_over_fence",
+  "off_wall",
+  "inchworm",
 )
 FPS = 50
 ELEVATED_Z = 0.20
@@ -102,7 +109,9 @@ UPRIGHT_Z = 0.9
 STANDING_Z = (0.60, 0.85)
 STILL_SPEED = 0.1
 STILL_JOINT_RMS = 0.5
-FEASIBILITY = ("elevated_support", "ground_penetration", "floating_feet")
+MAX_JOINT_SPEED = 100.0
+"""rad/s between consecutive 50 Hz frames; faster is a retargeting spike."""
+FEASIBILITY = ("elevated_support", "ground_penetration", "floating_feet", "joint_speed")
 
 # Set in main() before the pool forks; each worker makes its own MjData.
 MODEL: mujoco.MjModel | None = None
@@ -164,11 +173,13 @@ def feasibility(path: Path) -> dict:
   gate = upright & standing & still
   lower_foot = feet.min(axis=1)
   floating_frames = longest_run(gate & (lower_foot > FLOATING_Z))
+  max_joint_speed = float(np.abs(np.diff(joint_pos, axis=0)).max()) * FPS
   flags = {
     "elevated_support": elevated_frames >= ELEVATED_FRAMES,
     "ground_penetration": bool(zmin.min() < PENETRATION_Z)
     or soft_fraction > PENETRATION_FRACTION,
     "floating_feet": floating_frames >= FLOATING_FRAMES,
+    "joint_speed": max_joint_speed > MAX_JOINT_SPEED,
   }
   return {
     "name": path.stem,
@@ -180,6 +191,7 @@ def feasibility(path: Path) -> dict:
     "below_soft_fraction": round(soft_fraction, 4),
     "gated_frames": int(gate.sum()),
     "floating_frames": floating_frames,
+    "max_joint_speed": round(max_joint_speed, 2),
     "stance": lower_foot[gate].astype(np.float32),
   }
 
@@ -262,7 +274,7 @@ def main() -> None:
     "removed_by_name": len(names) - len(survivors),
     "removed_by_feasibility": len(survivors) - len(kept),
     "feasibility_flags_among_name_survivors": flagged,
-    "feasibility_first_match_elevated_penetration_floating": first_match,
+    "feasibility_first_match": first_match,
     "kept_frames_50hz": kept_frames,
     "kept_hours_frames": kept_frames / FPS / 3600,
     "kept_hours_duration": (kept_frames - len(kept)) / FPS / 3600,
