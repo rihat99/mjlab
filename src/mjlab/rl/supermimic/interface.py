@@ -13,7 +13,6 @@ from typing import Protocol
 
 import torch
 
-from mjlab.rl.supermimic.return_sampler import ReturnSampler
 from mjlab.utils.lab_api.math import (
   quat_apply,
   quat_apply_inverse,
@@ -24,6 +23,33 @@ from mjlab.utils.lab_api.math import (
 # Below this squared rotation angle the log/exp maps switch to their Taylor forms, which
 # keeps gradients finite at exactly zero rotation (the dynamics output starts at zero).
 _SMALL_ANGLE_SQ = 1e-12
+
+
+class ResetSampler(Protocol):
+  """The env's return-based reset sampler, as the runner drives it."""
+
+  def credit_episodes(
+    self, frames: torch.Tensor, returns: torch.Tensor, valid: torch.Tensor
+  ) -> None:
+    """Feed the returns-to-go (M, L) of finished episodes at their frames (M, L);
+    ``valid`` (M, L) marks the steps of each episode."""
+    ...
+
+  def update_past_weights(self) -> None:
+    """Advance the sampler's per-iteration state; called once per iteration."""
+    ...
+
+  def state_dict(self) -> dict[str, torch.Tensor]:
+    """State to checkpoint."""
+    ...
+
+  def load_state_dict(self, state: dict[str, torch.Tensor]) -> None:
+    """Restore :meth:`state_dict`."""
+    ...
+
+  def log(self) -> dict[str, float]:
+    """Scalars to log, each written as ``Metrics/sampler_<key>``."""
+    ...
 
 
 class ModelInterface(Protocol):
@@ -61,7 +87,7 @@ class ModelInterface(Protocol):
   """Number of actuated joints."""
   max_step_reward: float
   """Largest reward one step can earn (already multiplied by dt); normalises returns."""
-  return_sampler: ReturnSampler
+  return_sampler: ResetSampler
   """The env's reset sampler. The runner credits it the returns of finished episodes,
   advances its past weights once per iteration, logs and checkpoints it."""
 

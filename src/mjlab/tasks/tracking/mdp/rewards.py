@@ -122,3 +122,13 @@ def self_collision_cost(
     return hit.sum(dim=-1).float()  # [B]
   assert data.found is not None
   return data.found.squeeze(-1)
+
+
+def max_step_reward(env: ManagerBasedRlEnv) -> float:
+  """Largest reward of one env step, every positive term at 1 (the maximum of the
+  tracking terms) and the penalties at 0, scaled by dt as the env reward is; the
+  normaliser of the normalised return."""
+  manager = env.reward_manager
+  weights = [manager.get_term_cfg(name).weight for name in manager.active_terms]
+  scale = env.step_dt if env.cfg.scale_rewards_by_dt else 1.0
+  return scale * sum(w for w in weights if w > 0)

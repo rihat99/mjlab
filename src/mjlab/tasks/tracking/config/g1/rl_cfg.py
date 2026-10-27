@@ -51,7 +51,5 @@ def unitree_g1_tracking_supermimic_runner_cfg() -> SuperMimicRunnerCfg:
   """SuperMimic learner for the G1 tracking task (paper Table A.5 defaults)."""
   return SuperMimicRunnerCfg(
     experiment_name="g1_tracking_supermimic",
-    model_interface=(
-      "mjlab.tasks.tracking.supermimic.model_interface:TrackingModelInterface"
-    ),
+    model_interface="mjlab.tasks.tracking.rl.model_interface:TrackingModelInterface",
   )

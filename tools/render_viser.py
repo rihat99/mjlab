@@ -431,8 +431,8 @@ def rollout(task: str, checkpoint: Path, motion: Path) -> dict:
   import mjlab.tasks  # noqa: F401 -- registers the tasks
   from mjlab.tasks.registry import load_rl_cfg, load_runner_cls
   from mjlab.tasks.tracking.mdp.commands import MotionCommand
+  from mjlab.tasks.tracking.mdp.rewards import max_step_reward
   from mjlab.tasks.tracking.scripts.evaluate_library import make_library_env
-  from mjlab.tasks.tracking.supermimic.model_interface import max_step_reward
   from mjlab.utils.torch import configure_torch_backends
 
   configure_torch_backends()

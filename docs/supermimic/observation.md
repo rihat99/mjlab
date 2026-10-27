@@ -45,7 +45,7 @@ upright).
 reward × (clip frames − 1)), so a fall loses the rest of the clip; a clip *fails* if its episode ends early.
 
 **What the actor sees** (`env_cfgs.py:171-187`, checked by
-`src/mjlab/tasks/tracking/supermimic/model_interface.py:137-174`): Table A.1 with its noise, 93 per step, 10 steps
+`src/mjlab/tasks/tracking/rl/model_interface.py:137-174`): Table A.1 with its noise, 93 per step, 10 steps
 kept, 930 inputs. Nothing in it refers to the reference.
 
 | term | dims | frame | sensor noise (uniform ±) |

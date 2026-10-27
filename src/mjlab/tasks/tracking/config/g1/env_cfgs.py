@@ -13,7 +13,7 @@ from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.tasks.tracking import mdp
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
-from mjlab.tasks.tracking.supermimic.recorder import TerminalStateRecorder
+from mjlab.tasks.tracking.mdp.recorders import TerminalStateRecorder
 from mjlab.tasks.tracking.tracking_env_cfg import make_tracking_env_cfg
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.utils.spec_config import GeomCfg

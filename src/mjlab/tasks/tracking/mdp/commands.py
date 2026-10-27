@@ -10,7 +10,6 @@ import numpy as np
 import torch
 
 from mjlab.managers import CommandTerm, CommandTermCfg
-from mjlab.rl.supermimic.return_sampler import ReturnSampler
 from mjlab.utils.lab_api.math import (
   matrix_from_quat,
   normalize,
@@ -22,6 +21,7 @@ from mjlab.utils.lab_api.math import (
 from mjlab.viewer.debug_visualizer import DebugVisualizer
 
 from . import kernels
+from .return_sampler import ReturnSampler
 
 if TYPE_CHECKING:
   from collections.abc import Callable, Sequence

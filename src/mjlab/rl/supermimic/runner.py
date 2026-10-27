@@ -336,7 +336,7 @@ class SuperMimicRunner:
     The return-to-go G_t is computed backwards from the episode end, bootstrapped with
     V(s_T) in the episode's sim context (M, C) for truncated episodes (0 for
     terminated ones, and for all episodes before the critic's first fit);
-    ``ReturnSampler.credit_episodes`` gives every bin the episode entered G at its
+    ``ResetSampler.credit_episodes`` gives every bin the episode entered G at its
     first step in that bin.
     """
     iface = self.interface

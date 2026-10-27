@@ -67,7 +67,7 @@ from mjlab.rl.local_log_writer import TRAINING_SECONDS
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
 from mjlab.tasks.tracking.mdp.commands import MotionCommand, expand_motion_files
-from mjlab.tasks.tracking.supermimic.model_interface import max_step_reward
+from mjlab.tasks.tracking.mdp.rewards import max_step_reward
 from mjlab.utils.torch import configure_torch_backends
 
 # Failed clips listed on stdout; all of them are in the JSON.

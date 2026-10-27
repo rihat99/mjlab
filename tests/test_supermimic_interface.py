@@ -23,8 +23,8 @@ from mjlab.tasks.registry import load_env_cfg
 from mjlab.tasks.tracking.mdp import MotionCommandCfg, kernels
 from mjlab.tasks.tracking.mdp.commands import MotionCommand
 from mjlab.tasks.tracking.mdp.kinematics import TorchKinematics
-from mjlab.tasks.tracking.supermimic import TrackingModelInterface
-from mjlab.tasks.tracking.supermimic.recorder import floating_base_state
+from mjlab.tasks.tracking.mdp.recorders import floating_base_state
+from mjlab.tasks.tracking.rl.model_interface import TrackingModelInterface
 
 TASK_ID = "Mjlab-Tracking-Flat-Unitree-G1-SuperMimic"
 OBS_TERM_DIMS = (29, 29, 3, 3, 29)

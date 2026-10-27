@@ -27,10 +27,11 @@ from mjlab.tasks.tracking import mdp
 from mjlab.tasks.tracking.mdp import kernels
 from mjlab.tasks.tracking.mdp.commands import MotionCommand
 from mjlab.tasks.tracking.mdp.kinematics import TorchKinematics
-from mjlab.tasks.tracking.supermimic.recorder import (
+from mjlab.tasks.tracking.mdp.recorders import (
   TerminalStateRecorder,
   floating_base_state,
 )
+from mjlab.tasks.tracking.mdp.rewards import max_step_reward
 from mjlab.utils.lab_api.math import normalize, quat_apply_inverse
 from mjlab.utils.noise.noise_cfg import NoiseCfg
 
@@ -62,16 +63,6 @@ _TRACKING_REWARDS = (
   mdp.motion_global_body_linear_velocity_error_exp,
   mdp.motion_global_body_angular_velocity_error_exp,
 )
-
-
-def max_step_reward(env: ManagerBasedRlEnv) -> float:
-  """Largest reward of one env step, every positive term at 1 (the maximum of the
-  tracking terms) and the penalties at 0, scaled by dt as the env reward is; the
-  normaliser of the normalised return."""
-  manager = env.reward_manager
-  weights = [manager.get_term_cfg(name).weight for name in manager.active_terms]
-  scale = env.step_dt if env.cfg.scale_rewards_by_dt else 1.0
-  return scale * sum(w for w in weights if w > 0)
 
 
 class TrackingModelInterface:

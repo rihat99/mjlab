@@ -34,10 +34,10 @@ from mjlab.rl.supermimic.config import (
 )
 from mjlab.rl.supermimic.interface import FloatingBaseState
 from mjlab.rl.supermimic.replay_buffer import ReplayBuffer
-from mjlab.rl.supermimic.return_sampler import ReturnSampler, cap_probabilities
 from mjlab.rl.supermimic.runner import SuperMimicRunner, sim_steps_at
 from mjlab.rl.supermimic.world_model import world_model_loss
 from mjlab.rl.vecenv_wrapper import RslRlVecEnvWrapper
+from mjlab.tasks.tracking.mdp.return_sampler import ReturnSampler, cap_probabilities
 from mjlab.utils.lab_api.math import quat_apply
 
 NQ = 29
