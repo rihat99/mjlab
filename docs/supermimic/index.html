@@ -239,7 +239,7 @@
     </div>
   </div>
   <div class="kpi">
-    <div><strong>129,951</strong><span>clips, 263.9 h of motion</span></div>
+    <div><strong>129,951</strong><span>clips (263.9 h) in the shipped run's library</span></div>
     <div><strong>0.930</strong><span>normalised return</span></div>
     <div><strong>7–10</strong><span>failed clips</span></div>
     <div><strong>8.7 h</strong><span>on one GPU (11.5 h wall clock)</span></div>
@@ -273,10 +273,10 @@
         <rect x="70" y="132" width="103" height="22" fill="var(--imag)"/>
         <text x="179" y="148">ours: 1 GPU × 8.7 h, 7–10 failed of 129,951</text>
       </svg></div>
-      <figcaption><span class="fignum">Figure 1.</span> Training budget against failed clips on BONES-SEED. Three orders of magnitude separate SONIC's budget from the SuperMimic runs; ours is the orange bar.</figcaption>
+      <figcaption><span class="fignum">Figure 1.</span> Training budget against failed clips on BONES-SEED. Three orders of magnitude separate SONIC's budget from the SuperMimic runs; ours is the orange bar, the shipped policy on its 129,951-clip library.</figcaption>
     </figure>
     <div class="aside">
-      <p><strong>For the record.</strong> The paper's rows are its own claims. Its benchmark has 129,514 clips; ours keeps 129,951, mainly because our filter keeps cartwheels, handstands and kozak dances (362 of the 437 extra clips).</p>
+      <p><strong>For the record.</strong> The paper's rows are its own claims. Its benchmark has 129,514 clips; the shipped run's library kept 129,951, mainly because our filter keeps cartwheels, handstands and kozak dances (362 of the 437 extra clips). Three rules of ours added since (name terms <code>off_wall</code> and <code>inchworm</code>, a joint faster than 100 rad/s) remove 62 more and leave 129,889 clips for the retrain (<a href="failures.md">Why a few clips fail</a>, section 5).</p>
       <p>Our bar is the shipped checkpoint: 144,000 iterations at 217 ms each. The wall clock to that checkpoint was 11.5 h, because the checkpoint evaluations shared the GPU; the whole 160k run took 12.75 h. SONIC's budget is the paper's description "7 days on 128 GPUs".</p>
     </div>
   </div>
@@ -352,7 +352,7 @@
         <g class="stage" data-stage="5" tabindex="0" role="button" aria-label="Stage 6, return-based resets">
           <rect class="box" x="10" y="200" width="200" height="72" rx="8"/>
           <text class="title" x="110" y="224" text-anchor="middle">6 · Return-based resets</text>
-          <text class="sub" x="110" y="242" text-anchor="middle">1,016,327 bins of ≤ 1 s</text>
+          <text class="sub" x="110" y="242" text-anchor="middle">1,015,872 bins of ≤ 1 s</text>
           <text class="sub" x="110" y="258" text-anchor="middle">softmax(−25 G / G<tspan class="sb" dy="3">max</tspan><tspan dy="-3">), cap 50×</tspan></text>
         </g>
         <text class="sub" x="380" y="312" text-anchor="middle">217 ms per iteration on the shipped run (sim 57, world model 52, policy 85, critic 21)</text>
@@ -771,7 +771,7 @@
   <p>A good coach does not run the whole routine from the top every time. They find the second you keep falling and make you start there. The reset sampler is that coach. Where an episode starts decides what the flip-book, and so the world model and the imagined rollouts, are made of; so the sampler keeps a score for every second of every clip and starts more episodes where the score is low.</p>
   <div class="row">
     <div class="text">
-      <p>The library is cut into bins of at most 1 s, 1,016,327 of them for the 129,951 clips. Each bin keeps a moving average of the discounted return observed from it: when an episode ends, every bin it passed through is credited the return from its first step in that bin. A reset then draws a bin with <!-- commands.py bins; mdp/return_sampler.py; runner.py _finish_episodes; env.yaml g_max 10, bin_return_alpha 0.1, past_weight_alpha 1e-4, softmax_cap 50 --></p>
+      <p>The library is cut into bins of at most 1 s, 1,015,872 of them for the 129,889 clips (the shipped run had 1,016,327 for 129,951). Each bin keeps a moving average of the discounted return observed from it: when an episode ends, every bin it passed through is credited the return from its first step in that bin. A reset then draws a bin with <!-- commands.py bins; mdp/return_sampler.py; runner.py _finish_episodes; env.yaml g_max 10, bin_return_alpha 0.1, past_weight_alpha 1e-4, softmax_cap 50 --></p>
       <div class="eq"><span class="nw"><i>p</i><sub>b</sub> = 0.5 / <i>N</i><sub>b</sub></span> <span class="nw">+ 0.4 · cap<sub>50</sub>[ softmax(−25 <i>G</i><sub>b</sub> / <i>G</i><sub>max</sub>) ]<sub>b</sub></span> <span class="nw">+ 0.1 · past<sub>b</sub>,</span> &nbsp; <span class="nw"><i>G</i><sub>max</sub> = 10</span></div>
       <p>and a frame uniformly inside it. Half of all starts stay uniform, so nothing is ever forgotten. The softmax half leans hard towards low-return bins, and the cap is what keeps it sane: without it, one bin with a return 1 lower than the others gets e<sup>2.5</sup> ≈ 12 times their weight, and a bin at 0 among bins at 9 gets e<sup>22.5</sup> ≈ 6 × 10⁹ times, which is nearly the whole softmax: about half of all resets into one bin of a million. The cap limits any bin to 50 times the uniform share and hands the excess to the others.</p>
     </div>
@@ -810,7 +810,7 @@
 <!-- ============================================================ 8 -->
 <section id="results">
   <h2>8. Evaluation: 7 to 10 failed clips of 129,951</h2>
-  <div class="callout"><strong>Note.</strong> The numbers and videos in this section come from the policy trained with the heading in the observation (checkpoint 144k). The retrain with the goal layout of section 3 is running; this section will be updated. <!-- S_retrain results here --></div>
+  <div class="callout"><strong>Note.</strong> The numbers and videos in this section come from the policy trained with the heading in the observation (checkpoint 144k), on the 129,951-clip library. The retrain with the goal layout of section 3 is running on the filtered library of 129,889 clips; this section will be updated. <!-- S_retrain results here --></div>
   <div class="row">
     <p>The exam is the paper's (its App. F.1): every clip of the library plays once from its first frame with the deterministic policy, in waves of 4,096 environments, with friction 1.0, no randomisation and no noise. A clip fails if a training termination fires, pelvis more than 0.25 m from where it should be or tilted by more than the 0.8 threshold; its return is the summed reward divided by 0.1 × its steps, so a clip that falls early fails and scores low. One pass over all clips takes 4.4 min on the GPU alone. <!-- tools/train_library.py docstring; env_cfgs.py:182-184, 201, 210-215; env.yaml terminations; REPORT.md §6 --></p>
     <div class="aside"><p><strong>Tilt</strong> is the difference of the gravity z component between the two pelvis frames. A clip of F frames has F − 1 steps. MuJoCo Warp is not bit-deterministic across runs: a repeat of the 144k evaluation gives 10 failed clips instead of 7, with the same mean return 0.9303 and 6 clips in common.</p></div>

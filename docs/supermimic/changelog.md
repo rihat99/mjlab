@@ -43,7 +43,9 @@ Changes of this fork relative to upstream mjlab at `45b1e263e`. Upstream's own c
   training wall-clock per logged iteration and `curves.png` in the run dir; `--logger local` is the
   default); the WandB options, uploads and dependency are removed.
 - `csv_to_npz` writes a local npz and takes `--atol` / `--rtol` for its velocity self-check.
-- `tools/`: data conversion and filtering (LAFAN1, BONES-SEED), the training and evaluation launcher,
+- `tools/`: data conversion and filtering (LAFAN1, BONES-SEED; the filter keeps cartwheels, handstands
+  and the kozak dance and adds the name terms `off_wall` and `inchworm` and a joint-speed limit of
+  100 rad/s to the paper's), the training and evaluation launcher,
   evaluation reports, and video rendering of a policy and of its world model (see `usage.md`).
 - `MjlabViserScene.ghost_cast_shadow`: ghost meshes can cast shadows.
 

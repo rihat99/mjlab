@@ -4,8 +4,8 @@ A re-implementation of SuperMimic for the Unitree G1 on [mjlab](https://github.c
 one differentiable world model, fitted on simulator transitions of a whole motion library, trains a single
 whole-body tracking policy by backpropagation through imagined rollouts. There is no official code; this
 fork (branch `supermimic` of [rihat99/mjlab](https://github.com/rihat99/mjlab)) follows the paper and
-says below where it departs from it and why. It trains one policy on the 129,951 BONES-SEED clips on a
-single GPU; the results against the paper are below.
+says below where it departs from it and why. It trains one policy on the 129,889 BONES-SEED clips that
+pass its filters on a single GPU; the results against the paper are below.
 
 [![A cartwheel tracked by the policy; the blue ghost is the reference motion](docs/media/poster_sim_cartwheel.jpg)](docs/media/sim_cartwheel.mp4)
 
@@ -44,7 +44,7 @@ How it works here, step by step, with the observation, goal, noise and timing de
 | Warm-up | none | 64 prefill steps, then 500 world-model-only iterations | a usable model before the first policy gradient |
 | Precision | TF32 | bfloat16 autocast in the world-model fit and imagination | about twice the matmul rate |
 | Update-to-data ratio | 0.4 | 2.5 sim steps per iteration (0.4) | the paper does not define an iteration |
-| Library | SONIC's name filter + feasibility filter: 129,514 clips | the same filters, but cartwheels, handstands and the kozak dance kept: 129,951 clips | they need no prop |
+| Library | SONIC's name filter + feasibility filter: 129,514 clips | the same filters, but cartwheels, handstands and the kozak dance kept; plus name terms `off_wall` and `inchworm` and a joint-speed limit of 100 rad/s between frames: 129,889 clips | the kept three need no prop; the wall push-off needs a wall, the inchworm plank's hands sink into the floor, and faster joints are retargeting spikes ([failures](docs/supermimic/failures.md#5-filter-change)) |
 | Constraint budget | not given | `njmax` 350 rows per world | with self-collision, hard clips reach 275 rows; MuJoCo Warp silently drops rows beyond the budget |
 | Compute | 1 H100 × 3 h; 2 H100 × 9.8 h, data parallel | 1 RTX PRO 6000, single GPU | |
 
@@ -52,7 +52,8 @@ How it works here, step by step, with the observation, goal, noise and timing de
 
 > These results are from the policy trained with the heading term in the observation (99 values per step,
 > iteration 144,000 of a 160k-iteration run, the checkpoint in `checkpoints/seed` until the retrain with the
-> layout above replaces it).
+> layout above replaces it), trained and evaluated on the 129,951-clip library from before the three filter
+> rules of ours (`off_wall`, `inchworm`, joint speed).
 
 <!-- S_retrain results here -->
 

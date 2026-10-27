@@ -1,6 +1,7 @@
 # Why a few clips fail
 
-The shipped SEED policy (`checkpoints/seed/model_144000.pt`) tracks all but about ten of the 129,951 library clips.
+The shipped SEED policy (`checkpoints/seed/model_144000.pt`) tracks all but about ten of the 129,951 clips of its
+library (the library before the filter change of §5).
 This note asks which clips fail, how stable that set is, and why. It assumes you know the method; the [explainer
 page](index.html) covers training and evaluation, and [observation.md](observation.md) covers what the actor
 observes.
@@ -312,24 +313,26 @@ x/5 counts the two full evaluations and the three replays at 144k. Source: `A_fa
 `A_failures/refstats/ref_stats.json` (leg overlap `leg_pen_max`), `A_failures/replays/`; mechanisms and confidence
 as corrected by `X_fail_review/findings.md`.
 
-## 5. Filter proposal
+## 5. Filter change
 
-Three additions to `tools/filter_seed.py`, counted on the 129,951 kept clips:
+Three additions to `tools/filter_seed.py`, counted on the 129,951 clips of the shipped policy's library; applied
+on 2026-10-27, they leave 129,889 clips (263.7 h). No clip hits two rules.
 
 | rule | clips removed | hours | failing clips covered | events covered | why |
 |---|---|---|---|---|---|
 | name term `off_wall` | 8 | 0.012 | 3 | 6 | the wall-run motion (§3.9); all 8 clips are it |
 | name term `inchworm` | 24 | 0.056 | 5 | 9 | a pragmatic drop of one motion type (§3.8) |
-| max reference joint speed > 100 rad/s | 30 | 0.050 | 1 | 1 | data hygiene: 25 of 30 are actor A117 (shoulder pitch and wrist roll spikes) |
+| max reference joint speed > 100 rad/s (joint step between consecutive 50 Hz frames) | 30 | 0.050 | 1 | 1 | data hygiene: 25 of 30 are actor A117 (shoulder pitch and wrist roll spikes) |
 | all three | 62 | 0.118 | 9 | 16 of 468 (3.4 %) | 129,951 → 129,889 clips |
 
 Source: `A_failures/logs/filter_dryrun.txt` (hours), `A_failures/refstats/ref_stats.json`,
-`data/motions/seed/manifest.json`.
+`data/motions/seed/manifest.json`; `L_filter_relaunch/logs/verify_manifest.txt` checks that the applied filter removes
+exactly these 62 clips.
 
-The proposal removes the one missed prop, one dubious motion type and 30 clips with joint-speed spikes. It does not
+The change removes the one missed prop, one dubious motion type and 30 clips with joint-speed spikes. It does not
 touch the dominant failures: kneel loops (35 % of events), handstands (19 %), floor sitting, lying and crawling (13
-%), high jumps (12 %). Those need re-retargeting or a training change, not a filter. Applying it changes the
-library, so it only matters after a retrain; it is not applied in this task.
+%), high jumps (12 %). Those need re-retargeting or a training change, not a filter. It matters only for a
+policy trained on the new library; the retrain started on 2026-10-27 is the first.
 
 Rules counted and rejected:
 

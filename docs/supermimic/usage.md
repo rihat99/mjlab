@@ -41,9 +41,10 @@ Clip npz (T frames, the 30 bodies of the G1, world frame): `fps` (1,) = 50; `joi
 **BONES-SEED** ([bones-studio/seed](https://huggingface.co/datasets/bones-studio/seed), `g1.tar.gz`,
 120 fps CSVs, extracted into `data/raw/bones_seed/`; its own licence terms). `convert_seed.py` resamples
 to 50 Hz on the CPU; `filter_seed.py` applies the paper's name filter (SONIC's keywords plus "50cm" and
-"look_over_fence", except `cartwheel`, `handstand`, `handstand_ff_`, `kozak_dance`, which we keep) and
-feasibility filter and writes `manifest.json`: 142,220 clips, 130,063 after the name filter, 129,951 kept
-(263.9 h; the paper keeps 129,514). `motion_groups.py` writes `groups.json`.
+"look_over_fence", and our "off_wall" and "inchworm", except `cartwheel`, `handstand`, `handstand_ff_`,
+`kozak_dance`, which we keep) and feasibility filter with our joint-speed rule (no joint faster than
+100 rad/s between two 50 Hz frames) and writes `manifest.json`: 142,220 clips, 130,027 after the name
+filter, 129,889 kept (263.7 h; the paper keeps 129,514). `motion_groups.py` writes `groups.json`.
 
 ```bash
 $PY tools/convert_seed.py data/raw/bones_seed/g1/csv --workers 96
@@ -153,7 +154,8 @@ optimiser states, to stay under GitHub's 100 MB file limit) and the run's `param
 and `figures/` stay local (gitignored). It serves as `--run-dir` for `train_library.py --eval`,
 `view.py` and `imagine_video.py`; its `params/env.yaml` records the clip list under the training
 machine's paths, so on another machine add `--motions-dir data/motions/seed` (evaluation then uses the
-kept clips of `manifest.json`, the same 129,951 clips if your filter run matches). Loading it whole
+kept clips of `manifest.json`: 129,889 with the current filter, while the shipped checkpoint was trained and
+evaluated on 129,951, before the `off_wall`, `inchworm` and joint-speed rules). Loading it whole
 (`SuperMimicRunner.load` without a part selection) starts fresh optimisers.
 
 ## Configuration
