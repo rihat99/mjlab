@@ -1,14 +1,14 @@
 seed: 42
 num_steps_per_env: 1
-max_iterations: 100000
+max_iterations: 160000
 obs_groups:
   actor: !!python/tuple
   - actor
   critic: !!python/tuple
   - critic
 save_interval: 4000
-experiment_name: seed_supermimic
-run_name: seed100k_margin10
+experiment_name: seed
+run_name: seed
 logger: local
 resume: false
 load_run: .*
@@ -33,11 +33,6 @@ world_model:
   - 0.05
   - 0.003
   - 0.05
-  termination_head_hidden: !!python/tuple
-  - 256
-  - 128
-  termination_pos_weight: 1.0
-  running_statistics: true
   statistics_horizon: 100
 policy:
   encoder_hidden: !!python/tuple
@@ -63,10 +58,7 @@ policy:
   horizon: 32
   seed_end_margin: 10
   gamma: 0.99
-  obs_normalization: true
   normalizer_freeze_iteration: 20000
-  imagine_action_noise: true
-  analytic_termination: true
 critic:
   hidden: !!python/tuple
   - 256
@@ -87,5 +79,4 @@ schedule:
   lr_final_ratio: 0.03
 precision:
   tf32: true
-  compile: true
-  autocast: bf16
+  autocast: true

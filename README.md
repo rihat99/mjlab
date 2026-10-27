@@ -136,8 +136,10 @@ nohup $PY tools/train_library.py --eval --watch --gpu 0 --run-dir RUN --pid $TRA
 ```
 
 Train on BONES-SEED (the library goes to mjlab as a path list; each launch hashes the
-clips, ~1 min, and loads them, ~7–10 min; **TBD (SEED retrain)** s per iteration and
-**TBD** GB of GPU memory at 4096 envs):
+clips, ~1 min, and loads them, 35–70 min, CPU-bound; 0.22 s per iteration and about
+43 GB of GPU memory at 4096 envs, 9.7 h for 160k iterations; a watch evaluation of
+the full library holds another 29 GB and takes 10–12 min per checkpoint, during which
+the trainer slows to ~0.36 s per iteration):
 
 ```bash
 SEED="--motions-dir data/motions/seed --log-root runs/seed"
@@ -181,10 +183,11 @@ plays the clip once as the evaluation does (printing the normalised return and
 whether the policy fell) and records 20 s of it (by default the 20 s with the most
 motion) as a 1920x1080, 50 fps `videos/<clip>/reference.mp4` (blue ghost = reference)
 or, with `--ghost targets`, `targets.mp4` (orange ghost = joint targets), plus
-`rollout.npz`; `--stills T ...` writes PNG stills instead. About 1 s per frame:
+`rollout.npz`; `--stills T ...` writes PNG stills instead. About 1 s per frame.
+`checkpoints/seed` is the shipped policy (iteration 144,000, see Trained policy):
 
 ```bash
-$PY tools/view.py --run-dir RUN --clip side_roll_R_001__A304_M [--gpu 0]
+$PY tools/view.py --run-dir checkpoints/seed --clip side_roll_R_001__A304_M [--gpu 0]
 $PY tools/view.py --checkpoint RUN/model_14000.pt --clip dance1_subject3 \
     --video [--ghost targets] [--window-start FRAME] [--stills 2.0 4.0]
 ```
@@ -196,19 +199,31 @@ or without root.
 
 ## Trained policy
 
-`checkpoints/seed100k_margin10/` was trained with the code before this branch's
-method changes and no longer loads (critic input 831, now 840; a checkout of
-12c90fb65 still evaluates it). A policy retrained with the current
-code on the 129,951 kept BONES-SEED clips replaces it:
+`checkpoints/seed/model_144000.pt` is iteration 144,000 of a 160k-iteration run of
+this code (commit 92c228d2a) on the 129,951 kept BONES-SEED clips: 4096 envs,
+self-collision on, one RTX PRO 6000, 11.5 h to that iteration (8.7 h at the
+trainer's speed without the watch evaluation that shared its GPU). Of the
+40 checkpoints, each evaluated on the full library, it has the fewest failed clips:
+7 of 129,951, mean normalised return 0.930 (iteration 160,000: 23 failed, 0.919). No
+clip of the Table A.8 groups fails (the paper's SuperMimic fails 25 clips in all
+after 3 h on one GPU and none after 9.8 h on two, on 129,514 clips), nor of our
+cartwheels, handstands and kozak dance; per group the mean return is 0.81 for side
+rolls, 0.80 flips, 0.85 fire-in-the-hole turns, 0.84 crossed legs, 0.87 lying and
+standing up, 0.85 broad jumps, 0.83 cartwheels, 0.67 handstands, 0.59 kozak dance
+and 0.93 for all other clips. The mean return peaks at 0.952 at iteration 52,000
+(231 failed, all 160 handstands among them) and is 0.915–0.937 from iteration
+104,000 on, with 7–53 failed: the late iterations track ordinary standing and
+upper-body clips a little worse and learn the hard ones. The run hit no constraint
+overflow at `njmax` 350, but rare floor-exercise reset poses need up to ~380 rows,
+so the next run should use 400–450.
 
-**TBD (SEED retrain): `checkpoints/<name>/model_<it>.pt`, <it> iterations (4096 envs,
-<h> h on one RTX PRO 6000) at commit <sha>; normalised return <r> with <n> failed
-clips on the full library.**
-
-The folder serves as `--run-dir` for `--eval` and `--play` with
-`--motions-dir data/motions/seed`, and for `tools/view.py` as it is: the run's clip
-list is recorded under the training machine's paths, so the launcher takes the
-library from the motions dir instead (`manifest.json`'s kept clips).
+The folder holds the policy, critic, world model and reset-sampler state without the
+optimizer states (GitHub's 100 MB file limit) and the run's `params/`; the
+full-library evaluation JSON stays local (gitignored). It serves as `--run-dir` for
+`--eval` and `--play` with `--motions-dir data/motions/seed`, and for `tools/view.py`
+as it is: the run's clip list is recorded under the training machine's paths, so the
+launcher takes the library from the motions dir instead (`manifest.json`'s kept
+clips).
 
 ## Configuration
 

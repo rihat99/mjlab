@@ -25,3 +25,4 @@ checkpoints/*/figures/
 # Documentation outputs.
 **/_build/*
 **/generated/*
+checkpoints/library_*_files.txt

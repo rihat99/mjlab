@@ -34,7 +34,9 @@ Added
   share. The task simulates full robot self-collision without a penalty, randomises
   the friction of every robot collision geom (ground at 0.3 in training) and the
   encoder bias per episode and the torso CoM once per env; the sim context is
-  stored with every replay transition.
+  stored with every replay transition. The runner logs ``Sim/constraint_overflow``
+  and ``Sim/contact_overflow``, the number of envs whose simulation dropped
+  constraint rows or contacts beyond its budget since the last log row.
 - Added the ``evaluate_library`` script for tracking tasks: each clip of a library
   once from frame 0 with a deterministic policy, in waves of at most ``--num-envs``
   clips, into ``eval_library_<checkpoint stem>.json`` next to the checkpoint. One
@@ -60,6 +62,9 @@ Added
 Changed
 ^^^^^^^
 
+- The tracking tasks allocate 350 constraint rows per world (``njmax``, was 250):
+  hard BONES-SEED clips with full robot self-collision reached 275, and MuJoCo Warp
+  drops the rows beyond the budget.
 - Bumped ``rsl-rl-lib`` from 5.5.0 to 5.5.1. This removes the need for capping
   ``wandb`` below 0.29.
 

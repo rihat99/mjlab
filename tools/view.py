@@ -5,11 +5,11 @@ with the reference motion as a ghost, pause, a frame scrubber, and the checkpoin
 the run dir to switch between. viser prints its URL (port 8080, or the next free
 one); from another machine, forward the port first (``ssh -L 8080:localhost:8080
 HOST``). Ctrl-C stops it. Anything after ``--`` goes to ``play`` unchanged, e.g.
-``-- --device cpu``:
+``-- --device cpu``. ``checkpoints/seed`` is the shipped BONES-SEED policy
+(iteration 144000):
 
     PY=<repo>/.venv/bin/python
-    $PY tools/view.py --run-dir runs/seed/<run> \\
-        --clip side_roll_R_001__A304_M
+    $PY tools/view.py --run-dir checkpoints/seed --clip side_roll_R_001__A304_M
     $PY tools/view.py --checkpoint runs/lafan/<run>/model_14000.pt --clip dance1_subject3
 
 Video (``--video``): one deterministic rollout of the whole clip from frame 0, as the
@@ -25,7 +25,7 @@ through viser in a headless Chromium on ``--gpu``. Writes ``videos/<clip>/``:
 - ``rollout.npz``: the whole rollout (per 200 Hz substep ``qpos``, ``ctrl``; per
   policy step ``frame``, ``reward``, ``ref_qpos``) and the window.
 
-    $PY tools/view.py --run-dir runs/seed/<run> \\
+    $PY tools/view.py --run-dir checkpoints/seed \\
         --clip side_roll_R_001__A304_M --video [--ghost targets] [--window-start 100]
 
 The browser is Playwright's Chromium headless shell (``npx playwright install
