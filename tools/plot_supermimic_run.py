@@ -20,8 +20,7 @@ evaluations:
   of more than 60 clips only the 60 with the lowest return at the last checkpoint.
 
 ``--hours``: the training curves and ``library_eval.png`` against training wall-clock
-hours (metrics.csv's ``training_wall_seconds``; runs logged before that column use the
-sum of the logged iteration times, about 1 % less) instead of iterations.
+hours (metrics.csv's ``training_wall_seconds``) instead of iterations.
 
 The run directory is only read, so it can be called on a run that is still training.
 
@@ -60,18 +59,6 @@ def read_metrics(path: Path) -> dict[str, np.ndarray]:
     )
     for column in rows[0]
   }
-
-
-def training_hours(metrics: dict[str, np.ndarray]) -> tuple[np.ndarray, str]:
-  """Training wall-clock hours at each metrics row ``(n_rows,)`` and its axis label.
-
-  Runs logged before the ``TRAINING_SECONDS`` column: the cumulative logged iteration
-  time, which leaves out the replay prefill and checkpoint saves.
-  """
-  if TRAINING_SECONDS in metrics:
-    return metrics[TRAINING_SECONDS] / 3600, "training wall-clock (h)"
-  seconds = np.cumsum(metrics["Perf/collection_time"] + metrics["Perf/learning_time"])
-  return seconds / 3600, "training time (h, sum of iteration times)"
 
 
 def read_evals(run_dir: Path) -> list[dict]:
@@ -442,7 +429,7 @@ def main() -> None:
   metrics = read_metrics(args.run_dir / "metrics.csv")
   x, xlabel = metrics["iteration"], "training iteration"
   if args.hours:
-    x, xlabel = training_hours(metrics)
+    x, xlabel = metrics[TRAINING_SECONDS] / 3600, "training wall-clock (h)"
   plot_training_curves(metrics, x, xlabel, out_dir / "training_curves.png", title)
   evals = read_evals(args.run_dir)
   if not evals:

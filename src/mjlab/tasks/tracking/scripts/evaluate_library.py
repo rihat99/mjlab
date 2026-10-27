@@ -73,8 +73,6 @@ from mjlab.utils.torch import configure_torch_backends
 # Failed clips listed on stdout; all of them are in the JSON.
 MAX_PRINTED_FAILURES = 50
 CHECKPOINT_NAME = re.compile(r"model_(\d+)\.pt")
-# Training time of runs whose metrics.csv predates the TRAINING_SECONDS column.
-ITERATION_TIMES = "Perf/collection_time + Perf/learning_time"
 # --watch reads a checkpoint of a running training once its file is this old (s):
 # torch.save writes it in place.
 SETTLE_SECONDS = 30.0
@@ -331,34 +329,24 @@ def watched_checkpoints(cfg: EvaluateLibraryConfig) -> Iterator[Path]:
       yield path
 
 
-def training_seconds(checkpoint: Path) -> tuple[float | None, str | None]:
-  """Training wall-clock of the run at ``model_<it>.pt`` and the column it comes from.
+def training_seconds(checkpoint: Path) -> float | None:
+  """Training wall-clock (``TRAINING_SECONDS``) of the run at ``model_<it>.pt``.
 
   Read from ``metrics.csv`` next to the checkpoint, on the last row logged before the
-  save (iteration it - 1). A run logged before the ``TRAINING_SECONDS`` column existed
-  gives the sum of its logged iteration times (``ITERATION_TIMES``, without the replay
-  prefill and checkpoint saves). ``(None, None)`` without metrics.csv or for another
-  file name.
+  save (iteration it - 1). None without metrics.csv, before its first row or for
+  another file name.
   """
   match = CHECKPOINT_NAME.fullmatch(checkpoint.name)
   metrics = checkpoint.parent / "metrics.csv"
   if match is None or not metrics.is_file():
-    return None, None
+    return None
   with open(metrics, newline="") as handle:
     rows = [
       row
       for row in csv.DictReader(handle)
       if row["iteration"] and int(row["iteration"]) < int(match.group(1))
     ]
-  if not rows:
-    return None, None
-  if rows[-1].get(TRAINING_SECONDS):
-    return float(rows[-1][TRAINING_SECONDS]), TRAINING_SECONDS
-  iteration_times = sum(
-    float(row["Perf/collection_time"]) + float(row["Perf/learning_time"])
-    for row in rows
-  )
-  return iteration_times, ITERATION_TIMES
+  return float(rows[-1][TRAINING_SECONDS]) if rows else None
 
 
 def source_commit() -> dict[str, str | bool | None]:
@@ -448,12 +436,10 @@ def run_evaluate_library(
     policy = runner.get_inference_policy(device=device)
     result = evaluate_library(env, policy)
     match = CHECKPOINT_NAME.fullmatch(checkpoint.name)
-    seconds, seconds_from = training_seconds(checkpoint)
     result |= {
       "iteration": int(match.group(1)) if match else None,
       "checkpoint_mtime": checkpoint.stat().st_mtime,
-      "training_seconds": seconds,
-      "training_seconds_from": seconds_from,
+      "training_seconds": training_seconds(checkpoint),
       "provenance": {
         "task": task_id,
         "checkpoint_file": str(checkpoint.resolve()),

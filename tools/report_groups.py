@@ -17,8 +17,7 @@ motion group). For the last evaluation by iteration it writes, in ``--out-dir``
 
 Given several JSONs of a run, also ``library_eval_curves.png``: mean (and
 frame-weighted) normalised return and failed clips vs checkpoint iteration and vs
-training hours (the JSON's ``training_seconds``; for a JSON written before that key,
-from the run's metrics.csv as ``evaluate_library`` does), as the paper's Fig. 3(a)
+training wall-clock hours (the JSON's ``training_seconds``), as the paper's Fig. 3(a)
 and A.1;
 when the evaluated library is within 10 % of the paper's benchmark size, the paper's
 failed counts are drawn as reference lines.
@@ -36,7 +35,6 @@ import argparse
 import csv
 import json
 import math
-import re
 from pathlib import Path
 
 import matplotlib
@@ -45,10 +43,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from mjlab.tasks.tracking.scripts.evaluate_library import training_seconds
-
 DPI = 150
-CHECKPOINT_ITERATION = re.compile(r"model_(\d+)")
 # groups.json "paper_columns" keys and their table headers.
 PAPER_COLUMNS = {
   "size": "paper size",
@@ -60,26 +55,6 @@ PAPER_COLUMNS = {
 REST_ROWS = ("all other", "total")
 # Reference lines need a library of about the paper's benchmark size.
 REFERENCE_SIZE_TOLERANCE = 0.1
-
-
-def load_eval(path: Path) -> dict:
-  """An eval JSON with ``iteration`` and ``training_seconds`` set.
-
-  JSONs written before those keys get them from the file name and from the
-  checkpoint's metrics.csv (``training_seconds``).
-  """
-  evaluation = json.loads(path.read_text())
-  if evaluation.get("iteration") is None:
-    match = CHECKPOINT_ITERATION.search(path.stem)
-    evaluation["iteration"] = int(match.group(1)) if match else None
-  if "training_seconds" not in evaluation:
-    checkpoint = evaluation.get("provenance", {}).get("checkpoint_file")
-    seconds, column = training_seconds(Path(checkpoint)) if checkpoint else (None, None)
-    evaluation["training_seconds"], evaluation["training_seconds_from"] = (
-      seconds,
-      column,
-    )
-  return evaluation
 
 
 def default_groups_file(evaluation: dict) -> Path | None:
@@ -235,12 +210,6 @@ def plot_curves(evals: list[dict], groups: dict, out_path: Path, title: str) -> 
   ]
   if len(hours) < len(evals):
     hours = None
-  sources = {evaluation.get("training_seconds_from") for evaluation in evals}
-  hours_label = (
-    "training wall-clock (h)"
-    if sources == {"training_wall_seconds"}
-    else "training time (h, sum of iteration times)"
-  )
   total = groups.get("paper_columns", {}).get("total", {})
   num_clips = evals[-1]["num_clips"]
   reference = bool(total) and (
@@ -248,7 +217,7 @@ def plot_curves(evals: list[dict], groups: dict, out_path: Path, title: str) -> 
   )
   fig, axes = plt.subplots(2, 2, figsize=(14, 9))
   for column, (x, xlabel) in enumerate(
-    ((iterations, "checkpoint iteration"), (hours, hours_label))
+    ((iterations, "checkpoint iteration"), (hours, "training wall-clock (h)"))
   ):
     ax_return, ax_failed = axes[0, column], axes[1, column]
     if x is None:
@@ -297,7 +266,7 @@ def main() -> None:
   )
   args = parser.parse_args()
 
-  loaded = [(load_eval(path), path) for path in args.evals]
+  loaded = [(json.loads(path.read_text()), path) for path in args.evals]
   loaded.sort(key=lambda pair: (pair[0]["iteration"] is None, pair[0]["iteration"]))
   evals = [evaluation for evaluation, _ in loaded]
   last, last_path = loaded[-1]

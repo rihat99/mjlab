@@ -15,7 +15,6 @@ import pytest
 
 from mjlab.rl.local_log_writer import TRAINING_SECONDS, LocalLogWriter
 from mjlab.tasks.tracking.scripts.evaluate_library import (
-  ITERATION_TIMES,
   EvaluateLibraryConfig,
   checkpoint_files,
   results_json,
@@ -28,8 +27,7 @@ TOOLS = Path(__file__).resolve().parents[1] / "tools"
 
 
 def test_training_seconds(tmp_path: Path) -> None:
-  """The writer's wall-clock column is read at the row before the save; an older
-  metrics.csv without it gives the sum of the logged iteration times."""
+  """The writer's wall-clock column is read at the row before the save."""
   run = tmp_path / "run"
   writer = LocalLogWriter(str(run))
   for iteration in (49, 99):
@@ -39,19 +37,12 @@ def test_training_seconds(tmp_path: Path) -> None:
   with open(run / "metrics.csv", newline="") as handle:
     rows = list(csv.DictReader(handle))
   assert [row["iteration"] for row in rows] == ["49", "99"]
-  seconds, column = training_seconds(run / "model_100.pt")
-  assert column == TRAINING_SECONDS and seconds is not None
-  assert seconds == float(rows[1][TRAINING_SECONDS])
+  seconds = training_seconds(run / "model_100.pt")
+  assert seconds is not None and seconds == float(rows[1][TRAINING_SECONDS])
   assert 0 <= float(rows[0][TRAINING_SECONDS]) <= seconds
-  assert training_seconds(run / "model_50.pt")[0] == float(rows[0][TRAINING_SECONDS])
-
-  with open(run / "metrics.csv", "w", newline="") as handle:
-    fields = ["iteration", "Perf/collection_time", "Perf/learning_time"]
-    old = csv.DictWriter(handle, fieldnames=fields)
-    old.writeheader()
-    old.writerows({field: row[field] for field in fields} for row in rows)
-  assert training_seconds(run / "model_100.pt") == (6.0, ITERATION_TIMES)
-  assert training_seconds(run / "best.pt") == (None, None)
+  assert training_seconds(run / "model_50.pt") == float(rows[0][TRAINING_SECONDS])
+  assert training_seconds(run / "model_40.pt") is None  # before the first row
+  assert training_seconds(run / "best.pt") is None
 
   for iteration in (8000, 400, 12000):
     (run / f"model_{iteration}.pt").touch()
@@ -127,7 +118,6 @@ def fake_eval(iteration: int, failed: set[str], seconds: float) -> dict:
     "frame_weighted_normalized_return": 0.8,
     "iteration": iteration,
     "training_seconds": seconds,
-    "training_seconds_from": TRAINING_SECONDS,
     "clips": clips,
   }
 
