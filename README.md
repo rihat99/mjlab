@@ -1,266 +1,175 @@
-# mjlab, `supermimic` branch
+# SuperMimic on mjlab
 
-This branch of the mjlab fork [rihat99/mjlab](https://github.com/rihat99/mjlab)
-adds SuperMimic, model-based whole-body motion tracking over a clip library, for the
-Unitree G1. SuperMimic is described in Liao et al., *SuperMimic: Scaling Humanoid
-Whole-Body Control with One Differentiable World Model*, arXiv 2610.28480
-([project page](https://supermimic.github.io)); there is no official code, so this is
-a re-implementation from the paper. Upstream mjlab's README is on the `main` branch.
+A re-implementation of SuperMimic for the Unitree G1 on [mjlab](https://github.com/mujocolab/mjlab):
+one differentiable world model, fitted on simulator transitions of a whole motion library, trains a single
+whole-body tracking policy by backpropagation through imagined rollouts. There is no official code; this
+fork (branch `supermimic` of [rihat99/mjlab](https://github.com/rihat99/mjlab)) follows the paper and
+says below where it departs from it and why. It trains one policy on the 129,951 BONES-SEED clips on a
+single GPU; the results against the paper are below.
+
+[![A cartwheel tracked by the policy; the blue ghost is the reference motion](docs/media/poster_sim_cartwheel.jpg)](docs/media/sim_cartwheel.mp4)
+
+More clips (click to play): [side roll](docs/media/sim_side_roll.mp4) ·
+[flip](docs/media/sim_flip.mp4) · [handstand](docs/media/sim_handstand.mp4) ·
+[standing up](docs/media/sim_stand_up.mp4) · [walk](docs/media/sim_walk.mp4) ·
+[wave](docs/media/sim_wave.mp4) · two failures: [high jump](docs/media/sim_failed_high_jump.mp4),
+[wall jump](docs/media/sim_failed_wall_jump.mp4).
 
 ## What SuperMimic is
 
-One differentiable world model is fitted on short windows of simulator transitions
-from a replay buffer, for all clips of a motion library at once. A deterministic
-tracking policy is trained by backpropagation through 32-step rollouts imagined in
-that world model, with a critic for the value at the end of a rollout. Resets in the
-simulator favour the parts of the library where the policy earns the least return,
-so data collection concentrates on what it cannot track yet.
+SuperMimic (Liao et al., 2026, [arXiv:2610.28480](https://arxiv.org/abs/2610.28480),
+[project page](https://supermimic.github.io)) trains motion tracking with a learned simulator instead of
+model-free RL. A world model of the robot's dynamics is fitted on short windows of logged simulator
+transitions from all clips at once. The deterministic policy is improved by backpropagating the tracking
+reward through 32-step rollouts imagined in that model, with a critic for the value at the rollout's end.
+Resets favour the parts of the library where the return is lowest. The paper reports 25 failed motions of
+129,514 after 3 h on one H100, and none after 9.8 h on two.
 
-## What this branch adds
+How it works here, step by step, with the observation, goal, noise and timing details:
+[the explainer page](docs/supermimic/index.html) (open the file in a browser).
 
-- `src/mjlab/rl/supermimic/`: the task-agnostic learner. `config.py`
-  (`SuperMimicRunnerCfg`, every paper hyperparameter), `interface.py` (the
-  `ModelInterface` a task implements), `replay_buffer.py`, `world_model.py`,
-  `networks.py` (policy and critic), `algorithm.py` (world-model fit, imagination,
-  policy objective, critic fit), `return_sampler.py` (the return-based reset
-  distribution over 1 s bins of the library, paper App. D.1), `runner.py`
-  (collection, logging, checkpoints). The hot paths run through `torch.compile` (with
-  inductor's combo kernels) and CUDA graphs, the world-model fit and the policy
-  update under bfloat16 autocast.
-- `src/mjlab/tasks/tracking/`: a multi-clip `MotionCommand` (`motion_file` takes a
-  tuple of npz or a `.txt` listing them; tracked bodies only, float16 except the
-  positions), the 10-frame future-reference goal, pure tracking kernels with a
-  differentiable forward kinematics (`mdp/`), the `TrackingModelInterface`
-  (observation, goal, reward and termination on imagined states; `supermimic/`), the
-  task `Mjlab-Tracking-Flat-Unitree-G1-SuperMimic` (`config/g1/`) and the library
-  evaluation `scripts/evaluate_library.py` (paper App. F.1: each clip once from
-  frame 0, deterministic policy).
-- Local logging without WandB (`src/mjlab/rl/local_log_writer.py`: TensorBoard
-  events, `metrics.csv`, `curves.png`).
-- `tools/`: `train_library.py` (train, evaluate or play on a clip library),
-  `report_groups.py` (results per motion group, the paper's Table A.8),
-  `plot_supermimic_run.py` (figures of a run), `view.py` (a policy on one clip, live
-  in the browser or as a video, through `render_viser.py`), `convert_lafan.py`,
-  `convert_seed.py`, `filter_seed.py` and `motion_groups.py` (the npz libraries, the
-  paper's filters and motion groups), `paths.py` (where data, runs and videos live).
-- Tests: `tests/test_supermimic_*.py`, `test_motion_library.py`,
-  `test_tracking_kernels.py`, `test_tracking_kinematics.py`.
-- `checkpoints/`: trained policies (see Trained policy).
+## What differs from the paper, and why
 
-## Install
+| item | paper | here | why |
+|---|---|---|---|
+| Heading | does not say where the policy learns its heading error; the actor reads Table A.1 (93 values per step) | actor exactly Table A.1 (93 × 10 steps); the goal adds, for each of the 10 goal frames, the reference pelvis orientation seen from the robot pelvis (60 values, SONIC's form; goal 790) | the 730 reference values are written in the reference's heading frame, so without this the policy cannot see its heading error and drifts (94° after 60 s on LAFAN1). In the observation instead (99 per step) it tracks equally well ([observation.md](docs/supermimic/observation.md)) |
+| Self-collision | self-collision penalty removed (App. A) | full robot self-collision simulated, no penalty | as on hardware |
+| Friction | μ ~ U[0.3, 1.2] (Table A.3) | on every robot collision geom, ground at 0.3 in training | MuJoCo uses the larger friction of two geoms: with a ground of 1.0 only the feet would feel the sampled value |
+| Torso CoM offset | per episode, part of the sim context | sampled once per env at startup | changing it runs MuJoCo Warp's `set_const` over all worlds; per episode it doubles the env step (18 → 35 ms at 4096 envs) |
+| Critic input | state features, goal, sim context | plus the reference pelvis pose in the robot pelvis frame (9) | the root rewards depend on the xy and heading error that features and goal lack (BeyondMimic's critic terms) |
+| Value range | not clamped | critic values clamped to ±10 = max step reward / (1 − γ) in the λ-return targets and bootstraps | as allmimic and morphmimic: an overestimate cannot feed back into its own targets |
+| Reset sampling | 0.5 uniform + 0.4 softmax(−25 G/G_max) + 0.1 past weights | each bin's softmax weight capped at 50× the uniform share | allmimic's cap: the hard-bin mass spreads over many bins |
+| Termination in imagination | learned | analytic: sigmoids of the env's pelvis height and tilt errors | the rule is known exactly; nothing to fit |
+| Clip ends | not discussed | imagined rollouts end at least 10 frames before a clip's end | the critic is never fit there; without the margin its loss blew up on BONES-SEED |
+| Warm-up | none | 64 prefill steps, then 500 world-model-only iterations | a usable model before the first policy gradient |
+| Precision | TF32 | bfloat16 autocast in the world-model fit and imagination | about twice the matmul rate |
+| Update-to-data ratio | 0.4 | 2.5 sim steps per iteration (0.4) | the paper does not define an iteration |
+| Library | SONIC's name filter + feasibility filter: 129,514 clips | the same filters, but cartwheels, handstands and the kozak dance kept: 129,951 clips | they need no prop |
+| Constraint budget | not given | `njmax` 350 rows per world | with self-collision, hard clips reach 275 rows; MuJoCo Warp silently drops rows beyond the budget |
+| Compute | 1 H100 × 3 h; 2 H100 × 9.8 h, data parallel | 1 RTX PRO 6000, single GPU | |
 
-```bash
-git clone -b supermimic https://github.com/rihat99/mjlab.git mjlab-supermimic
-cd mjlab-supermimic
-uv sync --extra cu130            # Python 3.13, torch 2.14 for CUDA 13 (Blackwell)
-PY=$PWD/.venv/bin/python
-$PY -m pytest tests/
-```
+## Results
 
-The commands below run from the repo root. `--extra cu126` instead for NVIDIA drivers
-older than 580 (no Blackwell kernels). The GPU tools set `CUDA_VISIBLE_DEVICES` (and,
-where they render, `MUJOCO_GL=egl`) from their `--gpu` argument.
+> These results are from the policy trained with the heading term in the observation (99 values per step,
+> iteration 144,000 of a 160k-iteration run, the checkpoint in `checkpoints/seed` until the retrain with the
+> layout above replaces it).
 
-## Data
+<!-- S_retrain results here -->
 
-Everything the tools read and write lives inside the repo, gitignored
-(`tools/paths.py`); `$MJLAB_DATA`, when set, replaces `data/`, and any of these
-folders may be a symlink to a larger disk:
+Evaluation follows the paper (App. F.1): every clip played once from its first frame with the deterministic
+policy, friction 1.0, no noise or randomisation. A clip fails when the pelvis height error exceeds 0.25 m or
+its tilt error 0.8; the normalised return divides the summed reward by the maximum over the whole clip.
+Over all 129,951 clips: **7 failed** (a repeat evaluation gives 10: MuJoCo Warp is not bitwise
+deterministic) and a mean normalised return of **0.930**.
 
-- `data/motions/lafan/`: the 40 LAFAN1 G1 clips (`<clip>.npz`, 50 Hz).
-- `data/motions/seed/`: the BONES-SEED G1 clips, `manifest.json` (which clips the
-  filters keep) and `groups.json` (motion groups); `data/raw/bones_seed/`: the
-  download (`g1/csv/`, `metadata/`). `data/motions/test/`: clips in neither library.
-- `runs/lafan/`, `runs/seed/`: one folder `<timestamp>[_<tag>]/` per training run:
-  `params/env.yaml` and `params/agent.yaml` (the full configs, with the library's
-  paths), `metrics.csv` (one row per logged iteration, with `training_wall_seconds`),
-  `curves.png`, TensorBoard events, `model_<it>.pt`, `eval_library_model_<it>.json`,
-  `figures/`, `videos/play/`. `library_<hash>.txt` next to the runs records the
-  sha256 of every clip of a training library.
-- `videos/<clip>/`: videos, stills and `rollout.npz` of `tools/view.py --video`.
+Failed motions per group of the paper's Table A.8. Our groups are found by motion name; flips and
+lying/standing up only approximate the paper's sets, the dance routine cannot be identified, and the last
+three groups are ours.
 
-Clip npz format (T frames, the 30 bodies of the G1, world frame):
+| motion group (clips here / paper) | here: failed | here: mean return | SONIC | SuperMimic 1 GPU × 3 h | SuperMimic 2 GPUs × 9.8 h |
+|---|---|---|---|---|---|
+| side rolls (22 / 22) | 0 | 0.814 | 22 | 2 | 0 |
+| flips (54 / 44) | 0 | 0.797 | 44 | 1 | 0 |
+| fire-in-the-hole turns (20 / 20) | 0 | 0.852 | 3 | 3 | 0 |
+| crossed legs (10 / 10) | 0 | 0.845 | 9 | 0 | 0 |
+| lying, resting and standing up (102 / 99) | 0 | 0.866 | 28 | 8 | 0 |
+| broad jumps (24 / 24) | 0 | 0.848 | 15 | 0 | 0 |
+| dance routine (– / 8) | – | – | 8 | 0 | 0 |
+| cartwheels (112 / –) | 0 | 0.830 | – | – | – |
+| handstands (160 / –) | 0 | 0.671 | – | – | – |
+| kozak dance (90 / –) | 0 | 0.590 | – | – | – |
+| all other (129,357 / 129,287) | 7 | 0.931 | 50 | 11 | 0 |
+| **total (129,951 / 129,514)** | **7** | **0.930** | **179** | **25** | **0** |
 
-| key | shape | dtype |
-|---|---|---|
-| `fps` | (1,) | float64, 50 |
-| `joint_pos`, `joint_vel` | (T, 29) | float32 |
-| `body_pos_w`, `body_lin_vel_w`, `body_ang_vel_w` | (T, 30, 3) | float32 |
-| `body_quat_w` (wxyz) | (T, 30, 4) | float32 |
+Budget: here one RTX PRO 6000 Blackwell, 144,000 iterations at 4096 envs, 8.7 h of training at the trainer's
+own speed (11.5 h wall-clock, as an evaluation of every checkpoint shared the GPU). The paper: SONIC is the
+released checkpoint (128 L40 GPUs for 168 h); SuperMimic 3 h on one H100 or 9.8 h on two.
 
-LAFAN1, from the
-[LAFAN1 Retargeting Dataset](https://huggingface.co/datasets/lvhaidong/LAFAN1_Retargeting_Dataset)
-(`g1/*.csv`, 30 fps; motion data licence CC BY-NC-ND 4.0); mjlab's `csv_to_npz`
-resamples to 50 Hz, 20–100 s per clip:
+![Normalised return and failed clips of every checkpoint, against iteration and training hours, and failed clips per motion group](docs/media/library_eval_curves_annotated.png)
 
-```bash
-$PY tools/convert_lafan.py <LAFAN1_Retargeting_Dataset>/g1 --gpu 0 [--clips walk1_subject1,...]
-```
+The return peaks at 0.952 at iteration 52,000 while 231 clips still fail (all 160 handstands among them);
+later checkpoints learn the hard clips and give up a little return on ordinary ones. From iteration 104,000
+on, the failed count moves between 7 and 53 from one checkpoint to the next. Which clips fail and why:
+[failures.md](docs/supermimic/failures.md).
 
-BONES-SEED, from [bones-studio/seed](https://huggingface.co/datasets/bones-studio/seed)
-(`g1.tar.gz`, 120 fps CSVs, extracted into `data/raw/bones_seed/`). The filter writes
-`manifest.json`: the paper's name filter (SONIC's keywords plus "50cm" and
-"look_over_fence", except `cartwheel`, `handstand`, `handstand_ff_` and `kozak_dance`:
-those clips need no prop, so we train on them) and feasibility filter. Of 142,220
-clips, 129,951 are kept (264 h; the paper keeps 129,514); training uses the kept clips
-when the motions dir has a manifest. `groups.json` holds the motion groups of the
-paper's Table A.8 by metadata `content_name`: side rolls, fire-in-the-hole turns,
-crossed legs and broad jumps with the paper's sizes, flips (54 vs 44) and lying,
-resting and standing up (102 vs 99) approximate, cartwheels, handstands and the kozak
-dance ours; the paper's dance routine cannot be identified by name.
+How well the world model predicts the simulator: the policy acts from the same simulated state in both,
+on four clips, four start frames each (mean error of imagination vs simulation; `tools/imagine_video.py`).
 
-```bash
-$PY tools/convert_seed.py data/raw/bones_seed/g1/csv --workers 96   # ~1 min on 96 cores
-$PY tools/filter_seed.py data/raw/bones_seed --workers 96           # ~30 s
-$PY tools/motion_groups.py                                          # a few s
-```
+| clip | root position, step 32 | joints, step 32 | root position, step 128 | joints, step 128 | reward over 32 steps, imagined / simulated |
+|---|---|---|---|---|---|
+| walk | 0.28 cm | 0.15° | 1.09 cm | 0.21° | 0.988 / 0.988 |
+| cartwheel | 1.08 cm | 0.55° | 2.92 cm | 1.25° | 0.898 / 0.896 |
+| flip | 1.37 cm | 0.56° | 17.58 cm | 1.67° | 0.880 / 0.880 |
+| side roll | 2.53 cm | 0.83° | 4.73 cm | 1.65° | 0.868 / 0.862 |
 
-## Commands
+At the training horizon (32 steps, 0.64 s) imagination is on average 0.3 to 2.5 cm from the simulator and
+its reward within 0.006 of the simulated one (0.02 at worst for one start). Beyond it, contact-rich and
+airborne phases drift: one flip start diverges to 56 cm by step 128.
 
-Train on the LAFAN1 library (default `--motions-dir` and `--log-root`; 4096 envs;
-about 0.21 s per iteration on an RTX PRO 6000) and evaluate every checkpoint as it
-appears. Anything after `--` goes to mjlab's `train` unchanged, e.g. a
-`SuperMimicRunnerCfg` field as `--agent.policy.horizon 16`; `--clips a,b` trains on a
-subset; `--print-cmd` only prints the command. `RUN` is the run dir the training log
-names first (`Logging experiment in directory: ...`); the watcher waits for its
-`params/env.yaml`, loads the library once and evaluates each checkpoint until the
-training process has exited:
+## Documentation
+
+- [Explainer page](docs/supermimic/index.html): the method as implemented, with videos of simulation and
+  imagination side by side.
+- [observation.md](docs/supermimic/observation.md): where the policy gets its heading, compared with
+  BeyondMimic, SONIC and other re-implementations.
+- [failures.md](docs/supermimic/failures.md): the clips the policy fails and why.
+- [usage.md](docs/supermimic/usage.md): install, data preparation, training, evaluation, videos,
+  configuration, compute.
+- [changelog.md](docs/supermimic/changelog.md): what this fork adds to mjlab.
+
+## Try it
 
 ```bash
-mkdir -p runs/lafan
-nohup $PY tools/train_library.py --gpu 0 --iters 14000 --tag lafan \
-    -- --agent.save-interval 2000 > runs/lafan/train.log 2>&1 &
-TRAIN_PID=$!
-nohup $PY tools/train_library.py --eval --watch --gpu 0 --run-dir RUN --pid $TRAIN_PID \
-    > runs/lafan/eval_watch.log 2>&1 &
+git clone -b supermimic https://github.com/rihat99/mjlab.git && cd mjlab && uv sync --extra cu130
+.venv/bin/python tools/view.py --run-dir checkpoints/seed --clip side_roll_R_001__A304_M --motions-dir data/motions/seed
 ```
 
-Train on BONES-SEED (the library goes to mjlab as a path list; each launch hashes the
-clips, ~1 min, and loads them, 35–70 min, CPU-bound; 0.22 s per iteration and about
-43 GB of GPU memory at 4096 envs, 9.7 h for 160k iterations; a watch evaluation of
-the full library holds another 29 GB and takes 10–12 min per checkpoint, during which
-the trainer slows to ~0.36 s per iteration):
+The second line opens the policy on one clip in the browser; it needs the BONES-SEED clips converted
+first ([usage.md](docs/supermimic/usage.md)).
 
-```bash
-SEED="--motions-dir data/motions/seed --log-root runs/seed"
-mkdir -p runs/seed
-nohup $PY tools/train_library.py --gpu 0 --iters 160000 --tag seed $SEED \
-    > runs/seed/train.log 2>&1 &
+## Data licences
+
+- BONES-SEED ([bones-studio/seed](https://huggingface.co/datasets/bones-studio/seed)) is under its own
+  licence agreement (academic and qualifying-startup use; no redistribution of the raw data). Motion Data
+  by Bones Studio (https://bones.studio/).
+- LAFAN1 ([LAFAN1 Retargeting Dataset](https://huggingface.co/datasets/lvhaidong/LAFAN1_Retargeting_Dataset)):
+  CC BY-NC-ND 4.0.
+- The code, like mjlab, is under the Apache-2.0 licence.
+
+## References
+
+- SuperMimic: Q. Liao et al., *SuperMimic: Scaling Humanoid Whole-Body Control with One Differentiable World
+  Model*, [arXiv:2610.28480](https://arxiv.org/abs/2610.28480), [supermimic.github.io](https://supermimic.github.io).
+- mjlab: K. Zakka et al., [arXiv:2601.22074](https://arxiv.org/abs/2601.22074),
+  [github.com/mujocolab/mjlab](https://github.com/mujocolab/mjlab).
+- BeyondMimic: [arXiv:2508.08241](https://arxiv.org/abs/2508.08241),
+  [github.com/HybridRobotics/whole_body_tracking](https://github.com/HybridRobotics/whole_body_tracking)
+  (reward, action and critic terms).
+- SONIC: Z. Luo et al., *SONIC: Supersizing Motion Tracking for Natural Humanoid Whole-Body Control*,
+  [arXiv:2511.07820](https://arxiv.org/abs/2511.07820),
+  [github.com/NVlabs/GR00T-WholeBodyControl](https://github.com/NVlabs/GR00T-WholeBodyControl) (name filter,
+  goal heading term).
+- Other re-implementations we compared with: [Uni-SuperMimic](https://github.com/Motphys/Uni-SuperMimic)
+  (reference goal layout), [supermimic_vibed](https://github.com/zita-ch/supermimic_vibed) (soft
+  termination temperatures), [SuperMimic-Reproduced](https://github.com/CuboiLeo/SuperMimic-Reproduced)
+  (feasibility-filter gates), [allmimic](https://github.com/Shimingyi/allmimic) (value clamp, softmax cap),
+  [morphmimic](https://github.com/lzyang2000/morphmimic), [realmimic](https://github.com/kevinhenryzz/realmimic).
+
+```bibtex
+@article{liao2026supermimic,
+  title={SuperMimic: Scaling Humanoid Whole-Body Control with One Differentiable World Model},
+  author={Liao, Qiayuan and Shao, Yiyang and Long, Junfeng and Zakka, Kevin and Horowitz, Roberto and Abbeel, Pieter and Sreenath, Koushil},
+  journal={arXiv preprint arXiv:2610.28480},
+  year={2026}
+}
+
+@misc{zakka2026mjlablightweightframeworkgpuaccelerated,
+  title={mjlab: A Lightweight Framework for GPU-Accelerated Robot Learning},
+  author={Kevin Zakka and Qiayuan Liao and Brent Yi and Louis Le Lay and Koushil Sreenath and Pieter Abbeel},
+  year={2026},
+  eprint={2601.22074},
+  archivePrefix={arXiv},
+  primaryClass={cs.RO},
+  url={https://arxiv.org/abs/2601.22074},
+}
 ```
-
-Evaluate `--checkpoint`, or every checkpoint of the run (default: the newest) that
-has no `eval_library_model_<it>.json` yet (`-- --overwrite True`: all), on its
-training library in one process. The JSON holds the normalised return per clip
-length and per survived step, the failed clips (anchor height error over 0.25 m or
-tilt over 0.8), one record per clip, the run's training time at the checkpoint and,
-under `provenance`, the git commit of the evaluating code (`dirty` when tracked files
-differ from it) and the robot's collision setting. The GPU simulation is not bitwise
-deterministic across processes, so a clip's failure can differ between evaluations:
-
-```bash
-$PY tools/train_library.py --eval --gpu 0 [--run-dir RUN | --checkpoint RUN/model_14000.pt] [$SEED]
-```
-
-Results per motion group, as Table A.8 (from `groups.json` of the clips' folder, or
-`--groups FILE`), for the last checkpoint and, over several JSONs, the return and
-failed clips vs iteration and vs training hours (Fig. 3(a) and A.1), and a run's
-training figures, both in `RUN/figures/`; headless play of one clip into
-`RUN/videos/play/rl-video-step-0.mp4`:
-
-```bash
-$PY tools/report_groups.py RUN/eval_library_model_*.json [--groups FILE]
-$PY tools/plot_supermimic_run.py RUN [--hours]   # --hours: x axis in training hours
-$PY tools/train_library.py --play --gpu 0 --run-dir RUN --clip walk1_subject1
-```
-
-`tools/view.py` shows a policy on one clip live in mjlab's viser viewer (reference
-ghost, pause and step, frame scrubber, the run's checkpoints to switch between; it
-prints its URL, port 8080 or the next free one; from another machine run
-`ssh -L 8080:localhost:8080 HOST` first). The clip comes from the run's motions dir,
-else `data/motions/seed`, else `data/motions/lafan` (`--motions-dir` overrides);
-anything after `--` goes to mjlab's `play` (`-- --device cpu`: no GPU). `--video`
-plays the clip once as the evaluation does (printing the normalised return and
-whether the policy fell) and records 20 s of it (by default the 20 s with the most
-motion) as a 1920x1080, 50 fps `videos/<clip>/reference.mp4` (blue ghost = reference)
-or, with `--ghost targets`, `targets.mp4` (orange ghost = joint targets), plus
-`rollout.npz`; `--stills T ...` writes PNG stills instead. About 1 s per frame.
-`checkpoints/seed` is the shipped policy (iteration 144,000, see Trained policy):
-
-```bash
-$PY tools/view.py --run-dir checkpoints/seed --clip side_roll_R_001__A304_M [--gpu 0]
-$PY tools/view.py --checkpoint RUN/model_14000.pt --clip dance1_subject3 \
-    --video [--ghost targets] [--window-start FRAME] [--stills 2.0 4.0]
-```
-
-The video renders in a headless Chromium, by default Playwright's headless shell
-(`npx playwright install chromium-headless-shell`; `--chrome PATH` for another),
-which needs `libasound.so.2`; if it is missing, the tool prints how to get it, with
-or without root.
-
-## Trained policy
-
-`checkpoints/seed/model_144000.pt` is iteration 144,000 of a 160k-iteration run of
-this code (commit 92c228d2a) on the 129,951 kept BONES-SEED clips: 4096 envs,
-self-collision on, one RTX PRO 6000, 11.5 h to that iteration (8.7 h at the
-trainer's speed without the watch evaluation that shared its GPU). Of the
-40 checkpoints, each evaluated on the full library, it has the fewest failed clips:
-7 of 129,951, mean normalised return 0.930 (iteration 160,000: 23 failed, 0.919). No
-clip of the Table A.8 groups fails (the paper's SuperMimic fails 25 clips in all
-after 3 h on one GPU and none after 9.8 h on two, on 129,514 clips), nor of our
-cartwheels, handstands and kozak dance; per group the mean return is 0.81 for side
-rolls, 0.80 flips, 0.85 fire-in-the-hole turns, 0.84 crossed legs, 0.87 lying and
-standing up, 0.85 broad jumps, 0.83 cartwheels, 0.67 handstands, 0.59 kozak dance
-and 0.93 for all other clips. The mean return peaks at 0.952 at iteration 52,000
-(231 failed, all 160 handstands among them) and is 0.915–0.937 from iteration
-104,000 on, with 7–53 failed: the late iterations track ordinary standing and
-upper-body clips a little worse and learn the hard ones. The run hit no constraint
-overflow at `njmax` 350, but rare floor-exercise reset poses need up to ~380 rows,
-so the next run should use 400–450.
-
-The folder holds the policy, critic, world model and reset-sampler state without the
-optimizer states (GitHub's 100 MB file limit) and the run's `params/`; the
-full-library evaluation JSON stays local (gitignored). It serves as `--run-dir` for
-`--eval` and `--play` with `--motions-dir data/motions/seed`, and for `tools/view.py`
-as it is: the run's clip list is recorded under the training machine's paths, so the
-launcher takes the library from the motions dir instead (`manifest.json`'s kept
-clips).
-
-## Configuration
-
-- `SuperMimicRunnerCfg` (`src/mjlab/rl/supermimic/config.py`): the paper's
-  hyperparameters (Tables A.1–A.5); fields marked "(choice)" are not given in the
-  paper. `PolicyCfg.seed_end_margin` (default 10) keeps the last state of every
-  imagined rollout that many frames away from the clip end: the critic is fit on the
-  first `horizon` states only, and on libraries with many clips that end mid-motion
-  (SEED) a margin of 0 drove the critic loss to blow up after 1k–15k iterations.
-  Critic values are clamped to `max_step_reward / (1 - gamma)` (= 10, the largest
-  attainable return) in the λ-return targets, the policy's bootstrap V(s_H) and the
-  reset sampler's bootstrap (`Metrics/value_clip_fraction`). Imagined actions carry
-  no noise (paper Alg. A.1); `CollectionCfg.action_noise_std` acts in the simulator.
-- Task (`unitree_g1_flat_tracking_supermimic_env_cfg` in
-  `src/mjlab/tasks/tracking/config/g1/env_cfgs.py`): the pelvis is the anchor for
-  the fall test, the anchor rewards and the relative body targets. Full robot
-  self-collision (`FULL_COLLISION`, paper App. A) without a sensor or penalty;
-  friction U(0.3, 1.2) on all robot collision geoms, the ground at 0.3 in training,
-  everything at 1.0 in the play config. The sim context ξ (Table A.3) is stored with
-  every replay transition: friction and encoder bias are resampled at every reset,
-  the torso CoM offset once per env. The actor frame is Table A.1's proprioception
-  plus the 6D anchor-orientation error to the current reference frame (99 per frame,
-  10-frame history): our goal is written in the reference heading frame, so without
-  that term the policy cannot see its heading error (on LAFAN at 14k: 0.58 return and
-  49 degrees of yaw drift at 20 s, against 0.80 and 1.4 degrees with it). The goal
-  holds the 10 reference frames (root
-  position delta, 6D rotation, local root velocities, joint positions, 0.1 x joint
-  velocities, in the heading frame of the current reference frame; 730); no robot
-  position enters either. The critic also sees the reference root pose in the robot
-  root frame (position, 6D rotation; 840 inputs in all).
-- Imagined rollouts are discounted by the task's analytic soft termination (sigmoids
-  of the anchor height and tilt errors; `MotionCommandCfg.termination_*_temperature`).
-  Reset sampling caps a bin's softmax share at `MotionCommandCfg.softmax_cap` (50)
-  times the uniform share (`Metrics/sampler_top1_probability[_uncapped]`).
-- Not as in the paper: bfloat16 autocast (`PrecisionCfg.autocast`; off: fp32 with
-  TF32 matmuls); the CoM offset per env, not per episode (a `body_ipos` change runs
-  MuJoCo Warp's `set_const` over all worlds, +17.6 ms per env step at 4096 envs); the
-  analytic termination instead of a learned one; 500 world-model-only iterations
-  first (`CollectionCfg.warmup_world_model_iterations`); and our additions: the value
-  clamp, the softmax cap, the critic's reference root pose and `seed_end_margin`.
