@@ -31,7 +31,7 @@ from pathlib import Path
 
 import mujoco
 import numpy as np
-from paths import MOTIONS_SEED_DIR
+from paths import MOTIONS_DIR
 from scipy.spatial.transform import Rotation
 
 from mjlab.scene import Scene
@@ -224,7 +224,7 @@ def main() -> None:
     description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
   )
   parser.add_argument("input_dir", type=Path, help="<seed>/g1/csv")
-  parser.add_argument("--output-dir", type=Path, default=MOTIONS_SEED_DIR)
+  parser.add_argument("--output-dir", type=Path, default=MOTIONS_DIR)
   parser.add_argument("--clips", help="comma-separated clip names (default: all)")
   parser.add_argument("--every", type=int, default=1, help="every N-th clip by name")
   parser.add_argument("--workers", type=int, default=48)

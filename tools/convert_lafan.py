@@ -25,7 +25,7 @@ import argparse
 import os
 from pathlib import Path
 
-from paths import MOTIONS_DIR
+from paths import LAFAN_MOTIONS_DIR
 
 SELF_CHECK_TOLERANCE = 1e-4
 
@@ -35,7 +35,7 @@ def main() -> None:
     description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
   )
   parser.add_argument("input_dir", type=Path, help="folder of the G1 CSVs")
-  parser.add_argument("--output-dir", type=Path, default=MOTIONS_DIR)
+  parser.add_argument("--output-dir", type=Path, default=LAFAN_MOTIONS_DIR)
   parser.add_argument("--clips", help="comma-separated clip ids (default: all CSVs)")
   parser.add_argument("--gpu", type=int, default=0)
   args = parser.parse_args()

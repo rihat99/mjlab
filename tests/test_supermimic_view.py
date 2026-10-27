@@ -16,16 +16,16 @@ def tools(monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, ModuleType]:
   return importlib.import_module("view"), importlib.import_module("render_viser")
 
 
-def test_resolve_motion(tools, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_resolve_motion(tools, tmp_path: Path):
   view, _ = tools
-  recorded, seed, lafan = (tmp_path / name for name in ("recorded", "seed", "lafan"))
-  for folder, clips in ((recorded, "a"), (seed, "ab"), (lafan, "c")):
+  recorded, other = tmp_path / "recorded", tmp_path / "other"
+  for folder, clips in ((recorded, "ab"), (other, "ac")):
     folder.mkdir()
     for clip in clips:
       (folder / f"{clip}.npz").touch()
-  monkeypatch.setattr(view, "MOTIONS_SEED_DIR", seed)
-  monkeypatch.setattr(view, "MOTIONS_DIR", lafan)
   run = tmp_path / "run"
+  with pytest.raises(SystemExit, match="--motions-dir"):
+    view.resolve_motion("a", None, run)  # no params/env.yaml
   (run / "params").mkdir(parents=True)
   listing = tmp_path / "library_files.txt"
   listing.write_text(f"{recorded / 'a.npz'}\n")
@@ -36,19 +36,24 @@ def test_resolve_motion(tools, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     )
 
   record(str(listing))
-  # The run's own motions dir first, then SEED, then LAFAN.
+  # The run's library only: b is in the recorded folder but not in the library.
   assert view.resolve_motion("a", None, run) == recorded / "a.npz"
-  assert view.resolve_motion("b", None, run) == seed / "b.npz"
-  assert view.resolve_motion("c", None, run) == lafan / "c.npz"
-  assert view.resolve_motion("a", seed, run) == seed / "a.npz"
-  with pytest.raises(SystemExit, match="no c.npz"):
+  with pytest.raises(SystemExit, match="no clip b in the library"):
+    view.resolve_motion("b", None, run)
+  assert view.resolve_motion("c", other, run) == other / "c.npz"
+  with pytest.raises(SystemExit, match="no .*c.npz"):
     view.resolve_motion("c", recorded, run)
   # A run made on another machine: its clip list is not here.
   record(str(tmp_path / "elsewhere" / "library_files.txt"))
-  assert view.resolve_motion("a", None, run) == seed / "a.npz"
+  with pytest.raises(SystemExit, match="not on this machine.*--motions-dir"):
+    view.resolve_motion("a", None, run)
+  assert view.resolve_motion("a", other, run) == other / "a.npz"
   # A library recorded as a tuple of npz paths.
   record(f"!!python/tuple\n    - {recorded / 'a.npz'}")
   assert view.resolve_motion("a", None, run) == recorded / "a.npz"
+  record(f"!!python/tuple\n    - {tmp_path / 'moved' / 'a.npz'}")
+  with pytest.raises(SystemExit, match="1 of 1 library files .* not found"):
+    view.resolve_motion("a", None, run)
 
 
 def test_chrome(tools, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

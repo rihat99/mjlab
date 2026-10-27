@@ -29,7 +29,7 @@ import json
 import re
 from pathlib import Path
 
-from paths import MOTIONS_SEED_DIR, RAW_SEED_DIR
+from paths import MOTIONS_DIR, RAW_SEED_DIR
 
 PAPER_COLUMNS = ("size", "sonic", "supermimic_1gpu_3h", "supermimic_2gpu_9.8h")
 PAPER_TABLE = {
@@ -65,7 +65,7 @@ def main() -> None:
   parser = argparse.ArgumentParser(
     description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
   )
-  parser.add_argument("--motions-dir", type=Path, default=MOTIONS_SEED_DIR)
+  parser.add_argument("--motions-dir", type=Path, default=MOTIONS_DIR)
   parser.add_argument(
     "--metadata",
     type=Path,

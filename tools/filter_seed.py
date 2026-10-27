@@ -37,7 +37,7 @@ from pathlib import Path
 
 import mujoco
 import numpy as np
-from paths import MOTIONS_SEED_DIR
+from paths import MOTIONS_DIR
 
 from mjlab.scene import Scene
 from mjlab.tasks.tracking.config.g1.env_cfgs import unitree_g1_flat_tracking_env_cfg
@@ -196,7 +196,7 @@ def main() -> None:
     description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
   )
   parser.add_argument("seed_dir", type=Path, help="BONES-SEED root (metadata/)")
-  parser.add_argument("--motions-dir", type=Path, default=MOTIONS_SEED_DIR)
+  parser.add_argument("--motions-dir", type=Path, default=MOTIONS_DIR)
   parser.add_argument("--workers", type=int, default=48)
   args = parser.parse_args()
 

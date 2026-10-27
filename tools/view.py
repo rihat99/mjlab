@@ -32,10 +32,10 @@ The browser is Playwright's Chromium headless shell (``npx playwright install
 chromium-headless-shell``) unless ``--chrome`` names another; it needs
 ``libasound.so.2`` (the tool prints how to get it if missing).
 
-The clip is ``<motions dir>/<clip>.npz``. Without ``--motions-dir`` it is the first of
-these folders that has the clip: the one the run's ``params/env.yaml`` records,
-``data/motions/seed``, ``data/motions/lafan`` (``$MJLAB_DATA`` replaces ``data``;
-``tools/paths.py``).
+The clip is ``<motions-dir>/<clip>.npz``; without ``--motions-dir``, the clip of that
+name in the library the run's ``params/env.yaml`` records. If the run's record, its
+clip list or the clip is not on this machine (e.g. the shipped ``checkpoints/seed``
+on another machine), the tool stops and asks for ``--motions-dir``.
 """
 
 from __future__ import annotations
@@ -47,8 +47,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import yaml
-from paths import MOTIONS_DIR, MOTIONS_SEED_DIR, VIDEOS_DIR
+from paths import VIDEOS_DIR
 from render_viser import (
   GHOSTS,
   WINDOW_S,
@@ -60,47 +59,22 @@ from render_viser import (
   rollout,
   window_states,
 )
-from train_library import TASK, ParamsLoader, latest_checkpoint
-
-
-def recorded_motions_dir(run_dir: Path) -> Path | None:
-  """Folder of the first library file that ``run_dir/params/env.yaml`` records.
-
-  None without the record, or if its ``.txt`` clip list is not on this machine.
-  """
-  params = run_dir / "params" / "env.yaml"
-  if not params.is_file():
-    return None
-  env_cfg = yaml.load(params.read_text(), Loader=ParamsLoader)
-  recorded = env_cfg["commands"]["motion"]["motion_file"]
-  first = recorded if isinstance(recorded, str) else recorded[0]
-  if first.endswith(".txt"):
-    if not Path(first).is_file():
-      return None
-    with open(first) as listing:
-      first = listing.readline().strip()
-  return Path(first).parent
+from train_library import TASK, latest_checkpoint, recorded_library
 
 
 def resolve_motion(clip: str, motions_dir: Path | None, run_dir: Path) -> Path:
-  """``<motions_dir>/<clip>.npz``.
-
-  Without ``motions_dir``: the first of the run's recorded motions dir,
-  MOTIONS_SEED_DIR and MOTIONS_DIR that has the clip.
-  """
+  """``<motions_dir>/<clip>.npz``; without ``motions_dir``, the clip of that name in
+  the library of ``run_dir`` (``train_library.recorded_library``)."""
   if motions_dir is not None:
-    folders = [motions_dir]
-  else:
-    recorded = recorded_motions_dir(run_dir)
-    folders = [MOTIONS_SEED_DIR, MOTIONS_DIR]
-    if recorded is not None:
-      folders.insert(0, recorded)
-  for folder in folders:
-    if (folder / f"{clip}.npz").is_file():
-      return folder / f"{clip}.npz"
-  raise SystemExit(
-    f"no {clip}.npz in {', '.join(map(str, folders))} (choose --motions-dir)"
-  )
+    motion = motions_dir / f"{clip}.npz"
+    if not motion.is_file():
+      raise SystemExit(f"no {motion}")
+    return motion
+  library, _ = recorded_library(run_dir)
+  for motion in library:
+    if motion.stem == clip:
+      return motion
+  raise SystemExit(f"no clip {clip} in the library of {run_dir}: choose --motions-dir")
 
 
 def live(checkpoint: Path, motion: Path, gpu: int, extra: list[str]) -> None:

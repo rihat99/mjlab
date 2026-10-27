@@ -3,8 +3,10 @@
 The task is ``Mjlab-Tracking-Flat-Unitree-G1-SuperMimic`` (``TASK``).
 Train on the library = the kept clips of <motions-dir>/manifest.json if there is one
 (tools/filter_seed.py), else every npz of <motions-dir> (sorted), or the ``--clips``
-subset. Run dir <log-root>/<timestamp>[_<tag>]/ holding params/, TensorBoard events,
-metrics.csv, curves.png and model_<it>.pt (every 4000 iterations and at the end).
+subset; <motions-dir> defaults to BONES-SEED (data/motions/seed), <log-root> to
+runs/seed (``tools/paths.py``). Run dir <log-root>/<timestamp>[_<tag>]/ holding
+params/, TensorBoard events, metrics.csv, curves.png and model_<it>.pt (every 4000
+iterations and at the end).
 The motion paths go to mjlab as a list file, <log-root>/library_<sha256 of the sorted
 path list>[:12]_files.txt (one path per line; a tuple literal of 129k paths would
 exceed the argument size limit), which params/env.yaml records. The library itself is
@@ -13,9 +15,9 @@ recorded once in <log-root>/library_<same hash>.txt, in ``sha256sum`` format
 exists but the files have changed since:
 
     PY=<worktree>/.venv/bin/python
-    $PY tools/train_library.py --iters 14000 --tag first [--clips walk1_subject1,...]
-    $PY tools/train_library.py --iters 40 --motions-dir data/motions/seed \\
-        --log-root runs/seed
+    $PY tools/train_library.py --iters 160000 --tag seed
+    $PY tools/train_library.py --iters 14000 --motions-dir data/motions/lafan \\
+        --log-root runs/lafan [--clips walk1_subject1,...]
 
 Evaluate: the paper's library protocol (each clip once from frame 0, in waves of at
 most --num-envs clips) on the run's training library ->
@@ -36,8 +38,10 @@ one clip pass by default; it defaults to the newest run and its last checkpoint:
     $PY tools/train_library.py --play --clip walk1_subject1 [--run-dir DIR] \\
         [--checkpoint FILE] [--video-length N]
 
-A library file that is no longer at the path recorded in params/env.yaml (the data
-root moved) is taken from <motions-dir> by its file name.
+Play and evaluate use the library the run's params/env.yaml records (its clip list or
+tuple of npz paths); if that list or one of its files is not on this machine (a run
+made elsewhere, e.g. the shipped checkpoints/seed), they stop and ask for
+``--motions-dir``, whose library (as for training) then replaces the recorded one.
 
 Anything after ``--`` is passed to mjlab's train / play / evaluate_library unchanged
 (e.g. ``-- --agent.save-interval 100``; a repeated flag overrides the launcher's).
@@ -181,38 +185,34 @@ def wait_for_params(run_dir: Path, pid: int) -> None:
     time.sleep(10)
 
 
-def run_library(run_dir: Path, motions_dir: Path) -> list[Path]:
-  """The motion files a run trained on, from its ``params/env.yaml``.
+def recorded_library(run_dir: Path) -> tuple[list[Path], Path | None]:
+  """The motion files a run trained on, from its ``params/env.yaml``, and the ``.txt``
+  clip list that records them (None for a recorded tuple of paths).
 
-  A recorded file that no longer exists is taken from ``motions_dir`` by name; a
-  recorded ``.txt`` clip list that no longer exists (a run made on another machine)
-  is replaced by the library of ``motions_dir`` (``kept_clips``).
+  Exits with a message asking for ``--motions-dir`` when the record, its clip list or
+  one of its files is not on this machine.
   """
-  env_cfg = yaml.load(
-    (run_dir / "params" / "env.yaml").read_text(), Loader=ParamsLoader
-  )
+  params = run_dir / "params" / "env.yaml"
+  if not params.is_file():
+    raise SystemExit(f"{params} not found: choose the library with --motions-dir")
+  env_cfg = yaml.load(params.read_text(), Loader=ParamsLoader)
   recorded = env_cfg["commands"]["motion"]["motion_file"]
+  clip_list = None
   if isinstance(recorded, str) and recorded.endswith(".txt"):
-    if not Path(recorded).is_file():
-      print(
-        f"[train_library] clip list {recorded} not found, using the library of "
-        f"{motions_dir}",
-        flush=True,
+    clip_list = Path(recorded)
+    if not clip_list.is_file():
+      raise SystemExit(
+        f"the clip list {clip_list} of {run_dir} is not on this machine: choose the "
+        "library with --motions-dir"
       )
-      return kept_clips(motions_dir)
   library = [Path(path) for path in expand_motion_files(recorded)]
-  moved = [path for path in library if not path.is_file()]
-  if moved:
-    print(
-      f"[train_library] {len(moved)} of {len(library)} library files not at their "
-      f"recorded path, taken from {motions_dir} by name",
-      flush=True,
-    )
-    library = [path if path.is_file() else motions_dir / path.name for path in library]
   missing = [str(path) for path in library if not path.is_file()]
   if missing:
-    raise FileNotFoundError(f"library files of {run_dir} not found: {missing}")
-  return library
+    raise SystemExit(
+      f"{len(missing)} of {len(library)} library files of {run_dir} not found (e.g. "
+      f"{missing[0]}): choose the library with --motions-dir"
+    )
+  return library, clip_list
 
 
 def main() -> None:
@@ -244,15 +244,14 @@ def main() -> None:
   parser.add_argument(
     "--motions-dir",
     type=Path,
-    default=MOTIONS_DIR,
-    help="npz folder of the library (default: %(default)s; BONES-SEED: "
-    "data/motions/seed)",
+    help=f"npz folder of the library (train default: {MOTIONS_DIR}; play/eval: "
+    "replaces the run's recorded library)",
   )
   parser.add_argument(
     "--log-root",
     type=Path,
     default=LOG_ROOT,
-    help="folder of the runs (default: %(default)s; BONES-SEED: runs/seed)",
+    help="folder of the runs (default: %(default)s; LAFAN1: runs/lafan)",
   )
   parser.add_argument(
     "--run-dir", type=Path, help="play/eval: run dir (default: newest run)"
@@ -276,12 +275,13 @@ def main() -> None:
   if extra and extra[0] == "--":
     extra = extra[1:]
   args.log_root = args.log_root.resolve()
-  motions_dir = args.motions_dir.resolve()
+  motions_dir = None if args.motions_dir is None else args.motions_dir.resolve()
 
   bin_dir = Path(sys.executable).parent
   if not (args.play or args.eval):
     if args.iters is None:
       parser.error("training needs --iters")
+    motions_dir = motions_dir or MOTIONS_DIR
     if args.clips is None:
       motions = kept_clips(motions_dir)
     else:
@@ -334,12 +334,15 @@ def main() -> None:
       evaluated = ["--checkpoint-file", str(checkpoint)]
     if args.watch and args.pid is not None and not args.print_cmd:
       wait_for_params(run_dir, args.pid)
-    library = run_library(run_dir, motions_dir)
+    if motions_dir is None:
+      library, motion_list = recorded_library(run_dir)
+    else:
+      library, motion_list = kept_clips(motions_dir), None
     if args.eval:
-      # The list goes next to the run's own library files (<run log root>).
-      motion_list = library_list(library, run_dir.parent)
-      if not args.print_cmd:
-        write_library_list(library, motion_list)
+      if motion_list is None:
+        motion_list = library_list(library, args.log_root)
+        if not args.print_cmd:
+          write_library_list(library, motion_list)
       command = [
         sys.executable,
         "-m",
