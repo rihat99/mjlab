@@ -5,6 +5,10 @@ wandb/
 artifacts/
 benchmark_results/
 dist/
+data/
+runs/
+videos/
+trash/
 
 # Build/cache
 __pycache__/

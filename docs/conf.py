@@ -87,6 +87,8 @@ exclude_patterns = [
   ".DS_Store",
   "README.md",
   "licenses/*",
+  "supermimic/*",
+  "media/*",
 ]
 
 autodoc_mock_imports = [
