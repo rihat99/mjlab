@@ -20,7 +20,11 @@ frame-weighted) normalised return and failed clips vs checkpoint iteration and v
 training wall-clock hours (the JSON's ``training_seconds``), as the paper's Fig. 3(a)
 and A.1;
 when the evaluated library is within 10 % of the paper's benchmark size, the paper's
-failed counts are drawn as reference lines.
+failed counts are drawn as reference lines; ``per_clip_eval.png``: heatmap clips
+(rows, sorted by name) x checkpoints (columns) of the normalised return, a black cross
+on the cells of failed clips (a library of more than 60 clips: the 60 with the lowest
+return at the last checkpoint); and on stdout a markdown table of the checkpoints
+(normalised return per clip length and per survived step, failed clips).
 
 ``--groups`` defaults to ``groups.json`` in the folder of the evaluated clips (from the
 JSON's provenance); without one the table has the total only.
@@ -44,6 +48,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 DPI = 150
+MAX_HEATMAP_CLIPS = 60
 # groups.json "paper_columns" keys and their table headers.
 PAPER_COLUMNS = {
   "size": "paper size",
@@ -257,6 +262,77 @@ def plot_curves(evals: list[dict], groups: dict, out_path: Path, title: str) -> 
   plt.close(fig)
 
 
+def plot_per_clip_eval(evals: list[dict], out_path: Path, title: str) -> None:
+  """Heatmap clips (rows, by name) x checkpoints (columns) of the normalised return.
+
+  Crosses mark failed clips. Large libraries: the ``MAX_HEATMAP_CLIPS`` clips with the
+  lowest return at the last checkpoint.
+  """
+  clips = sorted({clip["clip"] for evaluation in evals for clip in evaluation["clips"]})
+  if len(clips) > MAX_HEATMAP_CLIPS:
+    last = sorted(evals[-1]["clips"], key=lambda clip: clip["normalized_return"])
+    title += (
+      f"\n{MAX_HEATMAP_CLIPS} lowest of {len(clips)} clips at the last checkpoint"
+    )
+    clips = sorted(clip["clip"] for clip in last[:MAX_HEATMAP_CLIPS])
+  row_of = {name: row for row, name in enumerate(clips)}
+  returns = np.full((len(clips), len(evals)), np.nan)
+  failed = np.zeros((len(clips), len(evals)), dtype=bool)
+  for column, evaluation in enumerate(evals):
+    for clip in evaluation["clips"]:
+      if clip["clip"] in row_of:
+        returns[row_of[clip["clip"]], column] = clip["normalized_return"]
+        failed[row_of[clip["clip"]], column] = clip["failed"]
+
+  fig, ax = plt.subplots(figsize=(3.0 + 1.1 * len(evals), 1.5 + 0.3 * len(clips)))
+  image = ax.imshow(returns, aspect="auto", cmap="viridis", vmin=0, vmax=1)
+  for row, column in zip(*np.nonzero(failed), strict=True):
+    ax.plot(column, row, marker="x", color="black", markersize=9, markeredgewidth=1.8)
+  for row in range(len(clips)):
+    for column in range(len(evals)):
+      if not np.isnan(returns[row, column]):
+        colour = "white" if returns[row, column] < 0.55 else "black"
+        ax.text(
+          column + 0.3,
+          row,
+          f"{returns[row, column]:.2f}",
+          ha="center",
+          va="center",
+          fontsize=7,
+          color=colour,
+        )
+  ax.set_xticks(
+    range(len(evals)), [str(evaluation["iteration"]) for evaluation in evals]
+  )
+  ax.set_yticks(range(len(clips)), clips, fontsize=8)
+  ax.set_xlabel("checkpoint iteration")
+  ax.set_title(title + "\nnormalised return per clip (x = failed clip)", fontsize=12)
+  fig.colorbar(image, ax=ax, label="normalised return", fraction=0.04, pad=0.02)
+  fig.tight_layout()
+  fig.savefig(out_path, dpi=DPI)
+  plt.close(fig)
+
+
+def checkpoint_table(evals: list[dict]) -> str:
+  """Markdown table of the checkpoint evaluations."""
+  lines = [
+    (
+      "| iteration | mean normalised return | frame-weighted normalised return "
+      "| mean per survived step | frame-weighted per survived step | failed / N |"
+    ),
+    "|---|---|---|---|---|---|",
+  ]
+  for e in evals:
+    lines.append(
+      f"| {e['iteration']} | {e['mean_normalized_return']:.4f} "
+      f"| {e['frame_weighted_normalized_return']:.4f} "
+      f"| {e['mean_normalized_return_survived']:.4f} "
+      f"| {e['frame_weighted_normalized_return_survived']:.4f} "
+      f"| {e['num_failed']} / {e['num_clips']} |"
+    )
+  return "\n".join(lines)
+
+
 def main() -> None:
   parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
   parser.add_argument("evals", type=Path, nargs="+", help="eval_library_*.json files")
@@ -297,6 +373,8 @@ def main() -> None:
     plot_curves(
       evals, groups, out_dir / "library_eval_curves.png", last_path.parent.name
     )
+    plot_per_clip_eval(evals, out_dir / "per_clip_eval.png", last_path.parent.name)
+    print(checkpoint_table(evals), end="\n\n")
   print(table)
   print(f"written to {out_dir}")
 

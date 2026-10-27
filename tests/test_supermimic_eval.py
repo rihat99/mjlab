@@ -116,6 +116,8 @@ def fake_eval(iteration: int, failed: set[str], seconds: float) -> dict:
     "num_failed": len(failed),
     "mean_normalized_return": sum(returns) / len(returns),
     "frame_weighted_normalized_return": 0.8,
+    "mean_normalized_return_survived": 0.85,
+    "frame_weighted_normalized_return_survived": 0.82,
     "iteration": iteration,
     "training_seconds": seconds,
     "clips": clips,
@@ -181,5 +183,9 @@ def test_report_groups(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
   assert "| rolls | exact | 2 | 1 | 50.00 | 0.7000 | 2 | 2 | 1 | 0 |" in markdown
   with open(out / "eval_library_model_8000_groups.csv", newline="") as handle:
     assert [row["group"] for row in csv.DictReader(handle)] == list(table)
-  for figure in ("eval_library_model_8000_groups.png", "library_eval_curves.png"):
+  for figure in (
+    "eval_library_model_8000_groups.png",
+    "library_eval_curves.png",
+    "per_clip_eval.png",
+  ):
     assert (out / figure).stat().st_size > 0
