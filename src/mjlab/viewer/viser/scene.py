@@ -305,6 +305,8 @@ class MjlabViserScene(ViserMujocoScene, DebugVisualizer):
 
     # Ghost mesh state.
     self._ghost_handles: dict[tuple[int, int], viser.BatchedMeshHandle] = {}
+    # Whether ghost meshes cast shadows; read when a ghost body is first drawn.
+    self.ghost_cast_shadow = False
     self._ghost_meshes: dict[int, dict[int, trimesh.Trimesh]] = {}
 
     # MjData used for ghost forward kinematics.
@@ -1277,7 +1279,7 @@ class MjlabViserScene(ViserMujocoScene, DebugVisualizer):
           batched_positions=positions,
           batched_colors=colors,
           opacity=alpha,
-          cast_shadow=False,
+          cast_shadow=self.ghost_cast_shadow,
           receive_shadow=False,
         )
       else:
@@ -1297,7 +1299,7 @@ class MjlabViserScene(ViserMujocoScene, DebugVisualizer):
             batched_positions=positions,
             batched_colors=colors,
             opacity=alpha,
-            cast_shadow=False,
+            cast_shadow=self.ghost_cast_shadow,
             receive_shadow=False,
           )
 

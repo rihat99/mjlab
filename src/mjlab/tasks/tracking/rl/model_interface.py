@@ -71,6 +71,11 @@ class TrackingModelInterface:
   Shapes: N envs, B any flat batch, nq = 29 joints on the G1. States follow
   :class:`FloatingBaseState` (root position env-local). Frames are global indices of
   the env's motion library (``MotionCommand``).
+
+  ``encoder_bias_range`` is the (centre, half-width) of the env's encoder-bias DR
+  range, with which ``actor_observation`` turns a context back into a bias; None
+  without that DR term (the play cfg), where a caller that feeds contexts of the
+  training cfg sets it.
   """
 
   def __init__(self, env: ManagerBasedRlEnv) -> None:
@@ -274,6 +279,7 @@ class TrackingModelInterface:
     env = self._env
     events = env.event_manager
     self._has_context = False
+    self.encoder_bias_range: tuple[float, float] | None = None
     names = {
       n for mode in ("startup", "reset") for n in events.active_terms.get(mode, [])
     }
@@ -294,7 +300,10 @@ class TrackingModelInterface:
     self._friction_range = (0.5 * (low + high), 0.5 * (high - low))
 
     bias_low, bias_high = events.get_term_cfg("encoder_bias").params["bias_range"]
-    self._bias_range = (0.5 * (bias_low + bias_high), 0.5 * (bias_high - bias_low))
+    self.encoder_bias_range = (
+      0.5 * (bias_low + bias_high),
+      0.5 * (bias_high - bias_low),
+    )
 
     com_cfg = events.get_term_cfg("base_com")
     if com_cfg.params["operation"] != "add":
@@ -334,11 +343,12 @@ class TrackingModelInterface:
         "encoder_bias and base_com (e.g. the play cfg)."
       )
     env = self._env
+    assert self.encoder_bias_range is not None  # set with the context
     friction = env.sim.model.geom_friction[:, self._friction_geom, 0]
     offset = env.sim.model.body_ipos[:, self._com_body] - self._default_com
     parts = {
       "friction": (friction.unsqueeze(-1), self._friction_range),
-      "encoder_bias": (self._robot.data.encoder_bias, self._bias_range),
+      "encoder_bias": (self._robot.data.encoder_bias, self.encoder_bias_range),
       "com_offset": (offset, self._com_range),
     }
     context = torch.empty(env.num_envs, self.context_dim, device=self.device)
@@ -367,7 +377,9 @@ class TrackingModelInterface:
     """
     del frame  # No actor term compares the state with the reference.
     _, quat, _, ang_vel_w, q, qd = self._state.split(s)
-    center, half = self._bias_range
+    if self.encoder_bias_range is None:
+      raise RuntimeError("No encoder_bias_range: the env cfg has no encoder_bias DR.")
+    center, half = self.encoder_bias_range
     bias = center + half * context[:, self._context_slices["encoder_bias"]]
     return kernels.proprio_observation(
       q,

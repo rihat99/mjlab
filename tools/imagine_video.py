@@ -1,7 +1,7 @@
 """Simulator vs world-model imagination of a SuperMimic policy, side by side.
 
-The clip is played once in MuJoCo as the library evaluation plays it (the protocol of
-``render_viser.rollout``: play cfg, 1 env, deterministic policy, from frame 0), keeping
+The clip is played once in MuJoCo as the library evaluation plays it
+(``render_viser.rollout``: play cfg, 1 env, deterministic policy, from frame 0), keeping
 the floating-base state s_t (root pose and velocity, joint angles and velocities),
 frame k_t, observation and action of every policy step. From each start step t0 the
 policy then acts for ``--horizon`` steps inside the world model, as the policy update
@@ -39,7 +39,6 @@ import argparse
 import os
 import time
 from contextlib import ExitStack
-from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -60,6 +59,7 @@ from render_viser import (
   find_chrome,
   free_port,
   ghost_model_of,
+  rollout,
   view_direction,
 )
 from train_library import TASK, latest_checkpoint
@@ -80,43 +80,35 @@ PLOT_JOINTS = ("left_knee_joint", "right_hip_pitch_joint")
 def simulate(checkpoint: Path, motion: Path) -> tuple:
   """Runner (policy and world model loaded) and the rollout: state (T + 1, S),
   frame (T,), newest observation frame (T, O), action (T, A), env reward (T,)."""
-  import mjlab.tasks  # noqa: F401 -- registers the tasks
-  from mjlab.tasks.registry import load_rl_cfg, load_runner_cls
-  from mjlab.tasks.tracking.scripts.evaluate_library import make_library_env
-  from mjlab.utils.torch import configure_torch_backends
+  rows: dict[str, list] = {k: [] for k in ("state", "frame", "obs", "action")}
 
-  configure_torch_backends()
-  agent_cfg = load_rl_cfg(TASK)
-  vec_env = make_library_env(TASK, [str(motion)], "cuda:0", agent_cfg.clip_actions)
-  runner_cls = load_runner_cls(TASK)
-  assert runner_cls is not None, f"{TASK} registers no runner"
-  runner = runner_cls(vec_env, asdict(agent_cfg), device="cuda:0")
-  parts = {"actor": True, "world_model": True}
-  runner.load(str(checkpoint), load_cfg=parts, strict=True, map_location="cuda:0")
-  policy, iface = runner.get_inference_policy(device="cuda:0"), runner.interface
-  rows: dict[str, list] = {k: [] for k in ("state", "frame", "obs", "action", "reward")}
-  obs, _ = vec_env.reset()
-  while True:
+  def keep(runner, obs, action) -> None:
+    iface = runner.interface
     rows["state"].append(iface.state_from_sim()[0])
     rows["frame"].append(iface.frame_from_sim()[0])
     rows["obs"].append(runner.alg.policy.frames_from_env_layout(obs["actor"])[0, -1])
-    with torch.no_grad():
-      action = policy(obs)
-    obs, reward, dones, _ = vec_env.step(action)
     rows["action"].append(action[0])
-    rows["reward"].append(reward[0].clone())  # the env reuses its reward buffer
-    if bool(dones[0]):
-      if bool(vec_env.unwrapped.termination_manager.terminated[0]):
-        raise SystemExit("the policy falls on this clip: choose a surviving one")
-      rows["state"].append(iface.terminal_state_snapshot()[0])
-      return runner, {key: torch.stack(value) for key, value in rows.items()}
+
+  parts = {"actor": True, "world_model": True}
+  states = rollout(TASK, checkpoint, motion, load_cfg=parts, on_step=keep)
+  if states["failed"]:
+    raise SystemExit("the policy falls on this clip: choose a surviving one")
+  runner = states["runner"]
+  rows["state"].append(runner.interface.terminal_state_snapshot()[0])
+  sim = {key: torch.stack(value) for key, value in rows.items()}
+  device = sim["action"].device
+  sim["reward"] = torch.tensor(
+    states["step_reward"], dtype=torch.float32, device=device
+  )
+  return runner, sim
 
 
 def play_context(iface) -> torch.Tensor:
   """Normalised context (1, C) of the play cfg's sim on the training DR ranges.
 
   The play env has no DR terms, so the interface lacks the encoder-bias range its
-  observation head needs to turn the context back into a bias: it is set here.
+  observation head needs to turn the context back into a bias: it is set here
+  (``encoder_bias_range``).
   """
   from mjlab.tasks.registry import load_env_cfg
 
@@ -124,9 +116,10 @@ def play_context(iface) -> torch.Tensor:
   low, high = events["foot_friction"].params["ranges"]
   bias_low, bias_high = events["encoder_bias"].params["bias_range"]
   com = np.array([events["base_com"].params["ranges"][axis] for axis in range(3)])
-  iface._bias_range = (0.5 * (bias_low + bias_high), 0.5 * (bias_high - bias_low))
+  center, half = 0.5 * (bias_low + bias_high), 0.5 * (bias_high - bias_low)
+  iface.encoder_bias_range = (center, half)
   friction = (1.0 - 0.5 * (low + high)) / (0.5 * (high - low))
-  bias = -iface._bias_range[0] / iface._bias_range[1] * np.ones(iface.nq)
+  bias = -center / half * np.ones(iface.nq)
   offset = -com.mean(1) / (0.5 * (com[:, 1] - com[:, 0]))
   context = np.concatenate(([friction], bias, offset))
   return torch.tensor(context, dtype=torch.float32, device="cuda:0").unsqueeze(0)
@@ -155,7 +148,7 @@ def imagine(runner, sim: dict, starts: list[int], horizon: int, context) -> dict
   for _ in range(horizon):
     with torch.autocast("cuda", torch.bfloat16, enabled=autocast):
       action, s_next, frames, next_frame, features, goal = alg.imagine_step(
-        frames, goal, s, features, ctx, frame, zeros[:, 0]
+        frames, goal, s, features, ctx, frame, zeros[:, 0], torch.zeros_like(goal)
       )
     action = action.float()
     out["reward"].append(iface.reward(s_next, action, a_prev, frame))
@@ -286,10 +279,6 @@ def render(args, model, segments: list[dict], out_path: Path, fps: float) -> Non
     imagined[:3] += SHIFT
     scene.add_ghost_mesh(imagined, imagined_model, alpha=1.0)
     scene.update_from_mjdata(data)
-    # Ghosts are made without shadows; the imagined robot casts one like the other.
-    for handle in scene._ghost_handles.values():
-      if not handle.cast_shadow:
-        handle.cast_shadow = True
     return browser.render(seg["camera"][0][i], seg["camera"][1][i], background)
 
   server = viser.ViserServer(host="127.0.0.1", port=free_port(), verbose=False)
@@ -298,6 +287,8 @@ def render(args, model, segments: list[dict], out_path: Path, fps: float) -> Non
     stack.callback(server.stop)
     browser = stack.enter_context(HeadlessBrowser(server, args.chrome, args.gpu))
     scene = build_scene(browser.client, model)
+    # Ghosts are made without shadows; the imagined robot casts one like the other.
+    scene.ghost_cast_shadow = True
     video = stack.enter_context(
       mediapy.VideoWriter(out_path, shape=(HEIGHT, WIDTH), fps=fps, crf=18)
     )

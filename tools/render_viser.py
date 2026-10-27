@@ -37,10 +37,11 @@ import signal
 import socket
 import subprocess
 import time
+from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import asdict
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
@@ -420,11 +421,20 @@ def free_port() -> int:
     return sock.getsockname()[1]
 
 
-def rollout(task: str, checkpoint: Path, motion: Path) -> dict:
+def rollout(
+  task: str,
+  checkpoint: Path,
+  motion: Path,
+  load_cfg: dict[str, bool] | None = None,
+  on_step: Callable[[Any, Any, Any], None] | None = None,
+) -> dict:
   """Play ``motion`` once from frame 0 with ``checkpoint`` (see the module docstring).
 
   Keeps qpos and ctrl after every substep and, per policy step, the reward and the
-  reference pose the step is scored against.
+  reference pose the step is scored against. ``load_cfg``: the checkpoint parts the
+  runner loads (default the actor). ``on_step(runner, obs, action)`` runs before each
+  policy step, while the sim holds the step's start state. The result's ``runner``
+  keeps the (closed) env's interface and models for the caller.
   """
   import torch
 
@@ -442,7 +452,10 @@ def rollout(task: str, checkpoint: Path, motion: Path) -> dict:
   assert runner_cls is not None, f"{task} registers no runner"
   runner = runner_cls(vec_env, asdict(agent_cfg), device="cuda:0")
   runner.load(
-    str(checkpoint), load_cfg={"actor": True}, strict=True, map_location="cuda:0"
+    str(checkpoint),
+    load_cfg=load_cfg or {"actor": True},
+    strict=True,
+    map_location="cuda:0",
   )
   policy = runner.get_inference_policy(device="cuda:0")
   env = vec_env.unwrapped
@@ -477,13 +490,17 @@ def rollout(task: str, checkpoint: Path, motion: Path) -> dict:
     ref_qpos[joint_q_adr] = command.joint_pos[0].cpu().numpy()
     step_ref_qpos.append(ref_qpos)
     with torch.no_grad():
-      obs, reward, dones, _ = vec_env.step(policy(obs))
+      action = policy(obs)
+      if on_step is not None:
+        on_step(runner, obs, action)
+      obs, reward, dones, _ = vec_env.step(action)
     step_reward.append(float(reward[0]))
     if bool(dones[0]):
       failed = bool(env.termination_manager.terminated[0])
       break
   num_frames = int(command.motion.clip_end[0] - command.motion.clip_start[0])
   states = {
+    "runner": runner,
     "model": copy.deepcopy(sim.mj_model),
     "free_q_adr": free_q_adr,
     "sub_qpos": np.array(sub_qpos),
