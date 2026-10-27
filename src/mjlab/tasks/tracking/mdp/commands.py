@@ -779,7 +779,8 @@ class MotionCommandCfg(CommandTermCfg):
   adaptive_alpha: float = 0.001
   sampling_mode: Literal["adaptive", "uniform", "start", "return"] = "adaptive"
   g_max: float = 10.0
-  """Return sampling: largest attainable discounted return, 0.1 / (1 - 0.99)."""
+  """Return sampling: largest attainable discounted return, max step reward 0.1 /
+  (1 - gamma 0.99); the SuperMimic runner refuses a value that differs."""
   bin_return_alpha: float = 0.1
   """Return sampling: EMA factor of the per-bin return estimates."""
   past_weight_alpha: float = 1e-4

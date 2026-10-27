@@ -237,7 +237,7 @@ class _SyntheticEnv:
       bin_start,
       bin_end,
       self.clip_end_of_frame[bin_start],
-      g_max=10.0,
+      g_max=_SyntheticInterface.max_step_reward / (1 - PolicyCfg.gamma),
       return_alpha=0.1,
       past_weight_alpha=1e-4,
       softmax_cap=50.0,

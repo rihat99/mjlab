@@ -28,6 +28,10 @@ _SMALL_ANGLE_SQ = 1e-12
 class ResetSampler(Protocol):
   """The env's return-based reset sampler, as the runner drives it."""
 
+  g_max: float
+  """Largest attainable discounted return, which scales the sampler's softmax; the
+  runner checks it against ``max_step_reward / (1 - gamma)``."""
+
   def credit_episodes(
     self, frames: torch.Tensor, returns: torch.Tensor, valid: torch.Tensor
   ) -> None:

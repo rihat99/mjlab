@@ -116,6 +116,12 @@ class SuperMimicRunner:
       compile=True,
       autocast=precision_cfg.autocast,
     )
+    g_max = iface.return_sampler.g_max
+    if not math.isclose(g_max, self.alg.value_limit):
+      raise ValueError(
+        f"The reset sampler's g_max {g_max} is not the largest attainable return "
+        f"max_step_reward / (1 - gamma) = {self.alg.value_limit}."
+      )
 
     # rsl_rl's Logger reads PPO-shaped keys; give it its own view of the cfg.
     writer_cfg = train_cfg["logger"]
