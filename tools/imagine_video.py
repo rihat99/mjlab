@@ -40,6 +40,7 @@ import os
 import time
 from contextlib import ExitStack
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -201,7 +202,8 @@ def plot(path: Path, title: str, sim, im, err: dict, frames0, joint_names) -> No
     ("root orientation error (deg)", None, err["rot_deg"]),
     ("mean joint error (deg)", None, err["joint_deg"]),
   ]
-  colors = plt.get_cmap("tab10").colors[: len(frames0)]
+  tab10 = plt.get_cmap("tab10")
+  colors = [tab10(i) for i in range(min(len(frames0), 10))]
   fig, axes = plt.subplots(2, 3, figsize=(11, 5.6), sharex=True, layout="constrained")
   steps = np.arange(sim.shape[1])
   for ax, (label, sim_y, im_y) in zip(axes.flat, panels, strict=True):
@@ -401,6 +403,8 @@ def main() -> None:
       "sim_env": sim["reward"].cpu().numpy()[window[:, :-1]].sum(1) / norm,
     }
     survival = np.prod(1.0 - im["termination"], axis=1)
+    summaries: dict[str, Any] = {f"error_{key}": value for key, value in err.items()}
+    summaries |= {f"reward_{key}": value for key, value in rewards.items()}
     np.savez(
       out_dir / f"imagine_h{horizon}.npz",
       starts=starts,
@@ -419,8 +423,7 @@ def main() -> None:
       checkpoint=str(checkpoint),
       motion=str(motion),
       max_step_reward=iface.max_step_reward,
-      **{f"error_{key}": value for key, value in err.items()},
-      **{f"reward_{key}": value for key, value in rewards.items()},
+      **summaries,
     )
     print(
       f"[imagine] H {horizon}, starts {starts} (frames {frames0.tolist()}); first "

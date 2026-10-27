@@ -14,6 +14,7 @@ from mjlab.rl.supermimic.interface import FloatingBaseState, ModelInterface
 from mjlab.rl.supermimic.networks import Critic, MotionPolicy
 from mjlab.rl.supermimic.replay_buffer import ReplayBuffer
 from mjlab.rl.supermimic.world_model import WorldModel, world_model_loss
+from mjlab.utils.logging import print_info
 
 
 @dataclass
@@ -219,7 +220,7 @@ class SuperMimic:
     sampled = buffer.sample_windows(
       cfg.batch_size * cfg.batches_per_update, cfg.window_k
     )
-    self.world_model.update_statistics_from_windows([sampled], self.iface)
+    self.world_model.update_statistics_from_windows(sampled, self.iface)
     batches = [
       {
         key: value[i * cfg.batch_size : (i + 1) * cfg.batch_size]
@@ -552,7 +553,8 @@ class SuperMimic:
 
   def load_state_dict(self, state: dict, load_cfg: dict, strict: bool) -> None:
     """Load the parts selected by ``load_cfg`` (keys actor, critic, world_model,
-    optimizer)."""
+    optimizer). A checkpoint without optimiser states (a shipped policy) leaves the
+    optimisers as they are."""
     if load_cfg.get("actor"):
       self.policy.load_state_dict(state["policy_state_dict"], strict=strict)
     if load_cfg.get("critic"):
@@ -560,7 +562,9 @@ class SuperMimic:
       self.critic_fitted = state["critic_fitted"]
     if load_cfg.get("world_model"):
       self.world_model.load_state_dict(state["world_model_state_dict"], strict=strict)
-    if load_cfg.get("optimizer"):
+    if load_cfg.get("optimizer") and "policy_optimizer_state_dict" not in state:
+      print_info("No optimizer state in the checkpoint: the optimizers start fresh.")
+    elif load_cfg.get("optimizer"):
       self.policy_optimizer.load_state_dict(state["policy_optimizer_state_dict"])
       self.critic_optimizer.load_state_dict(state["critic_optimizer_state_dict"])
       self.world_model_optimizer.load_state_dict(

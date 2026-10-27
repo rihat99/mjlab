@@ -8,7 +8,7 @@ from torch import nn
 
 from mjlab.rl.supermimic.config import WorldModelCfg
 from mjlab.rl.supermimic.interface import FloatingBaseState, ModelInterface
-from mjlab.rl.supermimic.networks import _update_in_place
+from mjlab.rl.supermimic.networks import update_in_place
 from mjlab.rl.supermimic.replay_buffer import ReplayBuffer
 
 # Transitions per chunk of the end-of-prefill statistics fit.
@@ -112,7 +112,7 @@ class WorldModel(nn.Module):
 
   @torch.no_grad()
   def update_statistics_from_windows(
-    self, batches: list[dict[str, torch.Tensor]], iface: ModelInterface
+    self, windows: dict[str, torch.Tensor], iface: ModelInterface
   ) -> None:
     """Running update of the statistics from the logged transitions of sampled windows
     (real data only, never imagined states).
@@ -122,22 +122,18 @@ class WorldModel(nn.Module):
     ``statistics_horizon`` updates of this size.
 
     Args:
-      batches: outputs of ``ReplayBuffer.sample_windows``.
+      windows: output of ``ReplayBuffer.sample_windows``.
       iface: the task's model interface (invariant features).
     """
-
-    def cat(key: str) -> torch.Tensor:
-      return torch.cat([windows[key] for windows in batches])
-
-    s0, actions, targets = cat("s0"), cat("actions"), cat("targets")
-    valid = cat("valid") > 0  # (B, k)
+    s0, actions, targets = windows["s0"], windows["actions"], windows["targets"]
+    valid = windows["valid"] > 0  # (B, k)
     num, k = valid.shape
     next_features = iface.invariant_features(targets.flatten(0, 1)).view(num, k, -1)
     features = torch.cat(
       (iface.invariant_features(s0).unsqueeze(1), next_features[:, :-1]), dim=1
     )
     states = torch.cat((s0.unsqueeze(1), targets[:, :-1]), dim=1)
-    window_context = cat("context").unsqueeze(1).expand(-1, k, -1)
+    window_context = windows["context"].unsqueeze(1).expand(-1, k, -1)
     inputs = self.dynamics_input(features, actions, window_context)[valid]
     increments = self.state.delta(states, targets)[valid]
     self.update_statistics(
@@ -166,7 +162,7 @@ class WorldModel(nn.Module):
     for normalizer, x in pairs:
       if max_count is not None:
         normalizer.get_buffer("count").clamp_(max=max_count)
-      _update_in_place(normalizer, x)
+      update_in_place(normalizer, x)
     self.nominal_scale.copy_(
       torch.maximum(self.increment_statistics.std, self.nominal_floor)
     )

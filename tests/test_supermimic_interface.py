@@ -336,9 +336,6 @@ def test_state_read_out(rollout) -> None:
   torch.testing.assert_close(lin_vel, data.root_link_lin_vel_w, atol=1e-4, rtol=0)
   torch.testing.assert_close(ang_vel, data.root_link_ang_vel_w, atol=1e-4, rtol=0)
   assert torch.equal(q, data.joint_pos) and torch.equal(qd, data.joint_vel)
-  assert torch.equal(
-    iface.state_from_sim(torch.tensor([2, 5], device=s.device)), s[[2, 5]]
-  )
 
 
 def test_terminal_snapshot(rollout) -> None:

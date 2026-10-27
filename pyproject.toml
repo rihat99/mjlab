@@ -168,7 +168,7 @@ stubPath = "typings"
 extra-paths = ["typings"]
 
 [tool.ty.src]
-include = ["src", "tests"]
+include = ["src", "tests", "tools"]
 exclude = ["src/mjlab/utils/lab_api", "typings"]
 
 [tool.pytest.ini_options]

@@ -478,7 +478,7 @@ def rollout(
     sub_qpos.append(sim.data.qpos[0].cpu().numpy().astype(np.float64))
     sub_ctrl.append(sim.data.ctrl[0].cpu().numpy().astype(np.float64))
 
-  sim.step = step_and_keep
+  sim.step = step_and_keep  # type: ignore[method-assign]
   step_frame, step_reward, step_ref_qpos = [], [], []
   while True:
     # The frame this step's reward is scored against.

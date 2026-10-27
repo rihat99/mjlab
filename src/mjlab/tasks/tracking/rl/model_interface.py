@@ -321,10 +321,9 @@ class TrackingModelInterface:
 
   # Sim access.
 
-  def state_from_sim(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
-    """Current state (N, 71) (or (len(env_ids), 71)), read from qpos / qvel."""
-    state = floating_base_state(self._env, self._command.cfg.entity_name)
-    return state if env_ids is None else state[env_ids]
+  def state_from_sim(self) -> torch.Tensor:
+    """Current state (N, 71), read from qpos / qvel."""
+    return floating_base_state(self._env, self._command.cfg.entity_name)
 
   def terminal_state_snapshot(self) -> torch.Tensor | None:
     """Pre-reset state (N, 71); rows valid for envs done in the last step."""

@@ -78,11 +78,11 @@ class MotionPolicy(nn.Module):
   @torch.no_grad()
   def update_normalizers(self, obs_hist: torch.Tensor, goal: torch.Tensor) -> None:
     """Update the running statistics with the newest env history frame and the goal."""
-    _update_in_place(self.obs_normalizer, self.frames_from_env_layout(obs_hist)[:, -1])
-    _update_in_place(self.goal_normalizer, goal)
+    update_in_place(self.obs_normalizer, self.frames_from_env_layout(obs_hist)[:, -1])
+    update_in_place(self.goal_normalizer, goal)
 
 
-def _update_in_place(normalizer: EmpiricalNormalization, x: torch.Tensor) -> None:
+def update_in_place(normalizer: EmpiricalNormalization, x: torch.Tensor) -> None:
   """rsl_rl's ``normalizer.update(x)`` (one process, no ``until``), in place: the std
   buffer keeps its storage (rsl_rl assigns a new tensor), so CUDA graphs that read the
   normaliser stay valid, and the batch count is made on the device (rsl_rl copies it

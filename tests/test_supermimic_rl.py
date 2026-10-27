@@ -113,8 +113,8 @@ class _SyntheticInterface:
     ]
     self.noise_widths = torch.cat(widths).to(env.device)
 
-  def state_from_sim(self, env_ids=None):
-    return self.env.state if env_ids is None else self.env.state[env_ids]
+  def state_from_sim(self):
+    return self.env.state
 
   def terminal_state_snapshot(self):
     return self.env.terminal_state
@@ -806,3 +806,13 @@ def test_runner_learn_save_load_and_inference(device, tmp_path):
     strict=False,
   ):
     torch.testing.assert_close(a, b)
+
+  # A shipped checkpoint carries no optimiser states; loading all parts still works.
+  shipped = torch.load(
+    tmp_path / "model_30.pt", map_location=device, weights_only=False
+  )
+  for key in [key for key in shipped if key.endswith("_optimizer_state_dict")]:
+    del shipped[key]
+  torch.save(shipped, tmp_path / "shipped.pt")
+  restored.load(str(tmp_path / "shipped.pt"), map_location=device)
+  torch.testing.assert_close(restored.get_inference_policy(device)(obs), actions)

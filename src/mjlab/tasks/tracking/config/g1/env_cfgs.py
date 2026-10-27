@@ -168,19 +168,19 @@ def unitree_g1_flat_tracking_supermimic_env_cfg(
     func=mdp.motion_end, params={"command_name": "motion"}, time_out=True
   )
 
-  actor_terms = cfg.observations["actor"].terms
-  new_actor_terms = {
-    "joint_pos": actor_terms["joint_pos"],
-    "joint_vel": actor_terms["joint_vel"],
-    "base_ang_vel": actor_terms["base_ang_vel"],
+  baseline_terms = cfg.observations["actor"].terms
+  actor_terms = {
+    "joint_pos": baseline_terms["joint_pos"],
+    "joint_vel": baseline_terms["joint_vel"],
+    "base_ang_vel": baseline_terms["base_ang_vel"],
     "projected_gravity": ObservationTermCfg(
       func=mdp.projected_gravity, noise=Unoise(n_min=-0.05, n_max=0.05)
     ),
-    "actions": actor_terms["actions"],
+    "actions": baseline_terms["actions"],
   }
   cfg.observations = {
     "actor": ObservationGroupCfg(
-      terms=new_actor_terms,
+      terms=actor_terms,
       enable_corruption=not play,
       history_length=10,
       flatten_history_dim=True,

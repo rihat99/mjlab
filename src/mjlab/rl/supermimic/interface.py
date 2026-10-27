@@ -95,8 +95,8 @@ class ModelInterface(Protocol):
   """The env's reset sampler. The runner credits it the returns of finished episodes,
   advances its past weights once per iteration, logs and checkpoints it."""
 
-  def state_from_sim(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
-    """Current sim state of the envs, (N, state_dim) (or (len(env_ids), state_dim))."""
+  def state_from_sim(self) -> torch.Tensor:
+    """Current sim state of the envs, (N, state_dim)."""
     ...
 
   def terminal_state_snapshot(self) -> torch.Tensor | None:
