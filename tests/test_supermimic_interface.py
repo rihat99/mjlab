@@ -27,8 +27,8 @@ from mjlab.tasks.tracking.supermimic import TrackingModelInterface
 from mjlab.tasks.tracking.supermimic.recorder import floating_base_state
 
 TASK_ID = "Mjlab-Tracking-Flat-Unitree-G1-SuperMimic"
-OBS_TERM_DIMS = (29, 29, 3, 3, 29, 6)
-OBS_DIM, GOAL_DIM = 99, 730
+OBS_TERM_DIMS = (29, 29, 3, 3, 29)
+OBS_DIM, GOAL_DIM = 93, 790
 NUM_ENVS = 8
 NUM_STEPS = 100
 # Envs started 3 frames before their clip end: motion_end fires on their third step.
@@ -63,7 +63,7 @@ class _PreResetQpos(RecorderTerm):
 
 
 def _newest_frame(actor: torch.Tensor, term_dims: tuple[int, ...]) -> torch.Tensor:
-  """Last history frame (N, 99) of a term-major flattened history (N, 10 * 99)."""
+  """Last history frame (N, 93) of a term-major flattened history (N, 10 * 93)."""
   history = actor.shape[-1] // sum(term_dims)
   parts = torch.split(actor, [history * d for d in term_dims], dim=-1)
   return torch.cat(
@@ -83,6 +83,7 @@ def rollout(tmp_path_factory: pytest.TempPathFactory):
   assert isinstance(motion_cmd, MotionCommandCfg)
   motion_cmd.motion_file = tuple(str(clip) for clip in clips)
   cfg.observations["actor"].enable_corruption = False
+  cfg.observations["goal"].enable_corruption = False
   cfg.metrics["substep_state"] = MetricsTermCfg(func=_SubstepState, per_substep=True)
   cfg.recorders["pre_reset_qpos"] = RecorderTermCfg(func=_PreResetQpos, params={})
   cfg.scene.num_envs = NUM_ENVS
@@ -390,9 +391,13 @@ def test_gradients_are_finite(rollout) -> None:
   )
   features = iface.invariant_features(s_next)
   critic_x = iface.critic_input(s_next, next_frames, features, goal, context)
-  (reward.sum() + goal.sum() + obs.sum() + critic_x.sum()).backward()
+  noisy_goal = iface.add_goal_noise(goal)
+  (reward.sum() + noisy_goal.sum() + obs.sum() + critic_x.sum()).backward()
   grad = s_next.grad
   assert grad is not None and torch.isfinite(grad).all()
+  # The goal's anchor-orientation part reads the root quaternion of the state.
+  goal_grad = torch.autograd.grad(iface.goal(s_next, next_frames).sum(), s_next)
+  assert torch.all(goal_grad[0].abs().sum(0)[3:7] > 0)
   # Every block of the state (pose, velocities, q, qd) reaches the reward.
   reward_grad = torch.autograd.grad(
     iface.reward(s_next, a, a_prev, frames).sum(), s_next

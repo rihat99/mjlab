@@ -54,6 +54,7 @@ BIN_SIZE = 50
 MAX_EPISODE_LENGTH = 40
 HEIGHT_TOLERANCE = 0.05
 NOISE_WIDTHS = (0.01, 0.5, 0.2, 0.05, 0.0)
+GOAL_NOISE_WIDTH = 0.05
 
 
 @pytest.fixture(scope="module")
@@ -145,6 +146,9 @@ class _SyntheticInterface:
 
   def add_observation_noise(self, o):
     return o + (2.0 * torch.rand_like(o) - 1.0) * self.noise_widths
+
+  def add_goal_noise(self, g):
+    return g + (2.0 * torch.rand_like(g) - 1.0) * GOAL_NOISE_WIDTH
 
   def goal(self, s, frame):
     env = self.env
@@ -312,7 +316,7 @@ class _SyntheticEnv:
     return s1
 
   def get_observations(self) -> TensorDict:
-    goal = self.iface.goal(self.state, self.frame)
+    goal = self.iface.add_goal_noise(self.iface.goal(self.state, self.frame))
     obs = {"actor": _term_major(self.history), "goal": goal}
     return TensorDict(obs, batch_size=[self.num_envs])
 

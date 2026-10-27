@@ -383,6 +383,17 @@ class MotionCommand(CommandTerm):
       motion.joint_vel[future].float(),
     )
 
+  def future_anchor_ori(
+    self, anchor_quat_w: torch.Tensor, frames: torch.Tensor, num_frames: int
+  ) -> torch.Tensor:
+    """Reference anchor orientation of frames ``frames .. frames + num_frames - 1``
+    (``future_frames``) seen from the robot anchor orientation ``anchor_quat_w``
+    (B, 4), as 6D (``kernels.relative_rotation_6d``). (B, num_frames * 6)."""
+    future = self.future_frames(frames, num_frames)
+    ref_quat = self.motion.body_quat_w[future, self.motion_anchor_body_index].float()
+    quat = anchor_quat_w.unsqueeze(-2).expand_as(ref_quat)
+    return kernels.relative_rotation_6d(quat, ref_quat).flatten(-2)
+
   def assign_clips_from_start(self, env_ids: torch.Tensor) -> None:
     """Point env ``i`` at the first frame of clip ``start_clip[i]`` (default ``i mod
     C``; play, evaluation)."""

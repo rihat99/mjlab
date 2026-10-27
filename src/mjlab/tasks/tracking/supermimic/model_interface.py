@@ -41,16 +41,16 @@ if TYPE_CHECKING:
 _COMMAND = "motion"
 _ACTOR = "actor"
 _GOAL = "goal"
-# Actor terms the observation head reproduces, in env order (Table A.1, plus
-# Uni-SuperMimic's orientation error to the current reference frame).
+# Actor terms the observation head reproduces, in env order (Table A.1).
 _ACTOR_FUNCS = (
   mdp.joint_pos_rel,
   mdp.joint_vel_rel,
   mdp.builtin_sensor,
   mdp.projected_gravity,
   mdp.last_action,
-  mdp.motion_current_anchor_ori_b,
 )
+# Goal terms the goal head reproduces, in env order.
+_GOAL_FUNCS = (mdp.motion_future_frames_reference, mdp.motion_future_anchor_ori_b)
 # Privileged critic input: the reference anchor pose in the robot anchor frame,
 # position (3) and orientation 6D (6).
 _ROOT_ERROR_DIM = 9
@@ -141,7 +141,7 @@ class TrackingModelInterface:
     if tuple(cfg.func for cfg in cfgs) != _ACTOR_FUNCS:
       raise ValueError(
         f"Actor terms {names} are not [joint_pos_rel, joint_vel_rel, builtin_sensor "
-        "(gyro), projected_gravity, last_action, motion_current_anchor_ori_b]."
+        "(gyro), projected_gravity, last_action]."
       )
     if not cfgs[0].params.get("biased", False):
       raise ValueError("The joint_pos actor term must use biased=True.")
@@ -162,7 +162,7 @@ class TrackingModelInterface:
       for dims, cfg in zip(term_dims, cfgs, strict=True)
     )
     self.obs_dim = sum(self.obs_term_dims)
-    expected = (self.nq, self.nq, 3, 3, self.action_dim, 6)
+    expected = (self.nq, self.nq, 3, 3, self.action_dim)
     if self.obs_term_dims != expected:
       raise ValueError(f"Actor term dims {self.obs_term_dims} != {expected}.")
     data = self._robot.data
@@ -191,11 +191,35 @@ class TrackingModelInterface:
     obs = self._env.observation_manager
     names = obs.active_terms[_GOAL]
     cfgs = [obs.get_term_cfg(_GOAL, name) for name in names]
-    if [cfg.func for cfg in cfgs] != [mdp.motion_future_frames_reference]:
-      raise ValueError("The goal group must hold only motion_future_frames_reference.")
+    if tuple(cfg.func for cfg in cfgs) != _GOAL_FUNCS:
+      raise ValueError(
+        "The goal group must hold [motion_future_frames_reference, "
+        "motion_future_anchor_ori_b]."
+      )
     self._future_frames: int = cfgs[0].params["future_frames"]
-    # Uni-SuperMimic's layout: 15 + 2 J per frame, no robot state in it.
-    self.goal_dim = self._future_frames * (15 + 2 * self.nq)
+    if cfgs[1].params["future_frames"] != self._future_frames:
+      raise ValueError("The goal terms must cover the same future frames.")
+    # Noise is None when the group disables corruption (play), as in the env.
+    self._goal_noise: list[NoiseCfg | None] = []
+    for name, cfg in zip(names, cfgs, strict=True):
+      noise = cfg.noise
+      if noise is None or (isinstance(noise, NoiseCfg) and noise.operation == "add"):
+        self._goal_noise.append(noise)
+      else:
+        raise ValueError(f"Goal term {name!r}: only additive NoiseCfg is supported.")
+    # goal() reads the robot anchor orientation from the state's root quaternion.
+    model = self._env.sim.mj_model
+    anchor_body = model.body(
+      f"{self._command.cfg.entity_name}/{self._command.cfg.anchor_body_name}"
+    ).id
+    if anchor_body != self._robot.indexing.root_body_id:
+      raise ValueError("The anchor body must be the root body.")
+    # Uni-SuperMimic's reference layout, 15 + 2 J per frame, then 6 per frame.
+    self._goal_term_dims = (
+      self._future_frames * (15 + 2 * self.nq),
+      self._future_frames * 6,
+    )
+    self.goal_dim = sum(self._goal_term_dims)
     if obs.group_obs_dim[_GOAL] != (self.goal_dim,):
       raise ValueError(f"Goal dim {obs.group_obs_dim[_GOAL]} != ({self.goal_dim},).")
 
@@ -344,18 +368,17 @@ class TrackingModelInterface:
     context: torch.Tensor,
     frame: torch.Tensor,
   ) -> torch.Tensor:
-    """(grad) Noise-free actor frame (B, 99) of state s (B, 71) shown with frame
+    """(grad) Noise-free actor frame (B, 93) of state s (B, 71) shown with frame
     (B,).
 
     [q + encoder bias - default q, qd, gyro (root-frame angular velocity), projected
-    gravity, a_prev, the reference anchor orientation of frame - 1 in the robot
-    anchor frame (6D, ``mdp.motion_current_anchor_ori_b``)]. The encoder bias comes
-    from the episode's context (B, 33).
+    gravity, a_prev]. The encoder bias comes from the episode's context (B, 33).
     """
+    del frame  # No actor term compares the state with the reference.
     _, quat, _, ang_vel_w, q, qd = self._state.split(s)
     center, half = self._bias_range
     bias = center + half * context[:, self._context_slices["encoder_bias"]]
-    obs = kernels.proprio_observation(
+    return kernels.proprio_observation(
       q,
       qd,
       quat,
@@ -364,13 +387,9 @@ class TrackingModelInterface:
       self._default_q,
       a_prev,
     )
-    _, anchor_quat = self._anchor_pose(s)
-    current = self._command.current_frames(frame)
-    ref_quat = self._command.motion.body_quat_w[current, self._anchor].float()
-    return torch.cat([obs, kernels.relative_rotation_6d(anchor_quat, ref_quat)], -1)
 
   def add_observation_noise(self, o: torch.Tensor) -> torch.Tensor:
-    """Observation (B, 99) plus fresh additive noise of each actor term's NoiseCfg
+    """Observation (B, 93) plus fresh additive noise of each actor term's NoiseCfg
     (none when the env disables corruption); the gradient of ``o`` is kept."""
     parts = torch.split(o, list(self.obs_term_dims), dim=-1)
     noisy = [
@@ -385,10 +404,29 @@ class TrackingModelInterface:
     return body_pos[:, self._anchor], body_quat[:, self._anchor]
 
   def goal(self, s: torch.Tensor, frame: torch.Tensor) -> torch.Tensor:
-    """Goal (B, 730) at frame (B,), independent of the state s (B, 71): the
+    """(grad) Noise-free goal (B, 790) of state s (B, 71) at frame (B,): the
     reference frames frame .. frame + K - 1 (clamped to the clip) in the heading
-    frame of frame - 1 (``MotionCommand.reference_goal``)."""
-    return self._command.reference_goal(frame, self._future_frames)
+    frame of frame - 1 (``MotionCommand.reference_goal``, 730), then the reference
+    anchor orientation of those frames seen from s's root, the anchor
+    (``MotionCommand.future_anchor_ori``, 60)."""
+    _, quat, _, _, _, _ = self._state.split(s)
+    return torch.cat(
+      [
+        self._command.reference_goal(frame, self._future_frames),
+        self._command.future_anchor_ori(quat, frame, self._future_frames),
+      ],
+      dim=-1,
+    )
+
+  def add_goal_noise(self, g: torch.Tensor) -> torch.Tensor:
+    """Goal (B, 790) plus fresh additive noise of each goal term's NoiseCfg (none
+    when the env disables corruption); the gradient of ``g`` is kept."""
+    parts = torch.split(g, list(self._goal_term_dims), dim=-1)
+    noisy = [
+      part if noise is None else noise.apply(part)
+      for part, noise in zip(parts, self._goal_noise, strict=True)
+    ]
+    return torch.cat(noisy, dim=-1)
 
   def critic_input(
     self,
@@ -398,7 +436,7 @@ class TrackingModelInterface:
     goal: torch.Tensor,
     context: torch.Tensor,
   ) -> torch.Tensor:
-    """(grad) Critic input (B, 840) = [features (B, 68), goal (B, 730), context
+    """(grad) Critic input (B, 900) = [features (B, 68), goal (B, 790), context
     (B, 33), root pose error (B, 9)] of state s (B, 71) at frame (B,); features and
     goal are ``invariant_features(s)`` and ``goal(s, frame)``.
 

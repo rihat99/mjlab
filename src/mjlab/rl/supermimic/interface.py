@@ -119,7 +119,12 @@ class ModelInterface(Protocol):
     ...
 
   def goal(self, s: torch.Tensor, frame: torch.Tensor) -> torch.Tensor:
-    """(grad) Goal (B, goal_dim) of state ``s`` (B, S) at frame ``frame`` (B,)."""
+    """(grad) Noise-free goal (B, goal_dim) of state ``s`` (B, S) at frame ``frame``
+    (B,)."""
+    ...
+
+  def add_goal_noise(self, g: torch.Tensor) -> torch.Tensor:
+    """Goal (B, goal_dim) plus fresh sensor noise as the env applies it."""
     ...
 
   def critic_input(

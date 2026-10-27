@@ -63,17 +63,18 @@ def robot_body_ori_b(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
   return ori_b.reshape(env.num_envs, -1)
 
 
-def motion_current_anchor_ori_b(
-  env: ManagerBasedRlEnv, command_name: str
+def motion_future_anchor_ori_b(
+  env: ManagerBasedRlEnv, command_name: str, future_frames: int = 10
 ) -> torch.Tensor:
-  """Reference anchor orientation of the current frame k_t - 1 seen from the robot
-  anchor, 6D (N, 6): Uni-SuperMimic's orientation-error observation. k_t - 1 is the
-  frame the state is aligned with (``MotionCommand.current_frames``); the next
-  reward is scored against k_t."""
+  """Reference anchor orientation of frames k_t .. k_t + K - 1 (clamped to the clip
+  end) seen from the robot anchor, 6D per frame: SONIC's ``motion_anchor_ori_b_mf``.
+
+  See ``MotionCommand.future_anchor_ori``. Returns (N, K * 6).
+  """
   command = cast(MotionCommand, env.command_manager.get_term(command_name))
-  frames = command.current_frames(command.time_steps)
-  ref_quat = command.motion.body_quat_w[frames, command.motion_anchor_body_index]
-  return kernels.relative_rotation_6d(command.robot_anchor_quat_w, ref_quat.float())
+  return command.future_anchor_ori(
+    command.robot_anchor_quat_w, command.time_steps, future_frames
+  )
 
 
 def motion_future_frames_reference(

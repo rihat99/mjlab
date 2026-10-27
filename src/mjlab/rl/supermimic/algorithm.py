@@ -285,23 +285,25 @@ class SuperMimic:
     context: torch.Tensor,
     frame: torch.Tensor,
     noise: torch.Tensor,
+    goal_noise: torch.Tensor,
   ) -> tuple[torch.Tensor, ...]:
     """One imagined step.
 
     Args:
       frames: (B, history, obs_dim) noisy observation frames, oldest first.
-      goal: (B, G) goal of ``s``.
+      goal: (B, G) noise-free goal of ``s``.
       s: (B, S) state; features: (B, F) its invariant features.
       context: (B, C) normalised sim context of each row's episode.
       frame: (B,) goal frame k_t of ``s``.
       noise: (B, obs_dim) observation noise of s_next's frame.
+      goal_noise: (B, G) noise of the goal the policy reads at ``s``.
 
     Returns:
       action a (B, A) (noise-free, paper Alg. A.1), s_next (B, S), the frames
       shifted by s_next's noisy observation (B, history, obs_dim), its goal frame
       k_{t+1} (B,), features (B, F) and goal (B, G) of s_next.
     """
-    action = self.policy.forward_frames(frames, goal)
+    action = self.policy.forward_frames(frames, goal + goal_noise)
     s_next = self.world_model.step(s, features, action, context)
     next_frame = frame + 1
     obs = self.iface.actor_observation(s_next, action, context, next_frame) + noise
@@ -396,6 +398,9 @@ class SuperMimic:
       (history + cfg.horizon) * num, iface.obs_dim, device=self.device
     )
     noise = iface.add_observation_noise(zeros).view(-1, num, iface.obs_dim)
+    # The policy reads noisy goals; the critic and the stored rollout keep them clean.
+    goal_zeros = torch.zeros(cfg.horizon * num, iface.goal_dim, device=self.device)
+    goal_noise = iface.add_goal_noise(goal_zeros).view(-1, num, iface.goal_dim)
     with torch.no_grad():
       frames = self._history_frames(
         seeds["state_hist"],
@@ -419,7 +424,7 @@ class SuperMimic:
     feature_list, goal_list = [features], [goal]
     for t in range(cfg.horizon):
       action, s_next, frames, next_frame, features, goal = self._imagine_step(
-        frames, goal, s, features, context, frame, noise[history + t]
+        frames, goal, s, features, context, frame, noise[history + t], goal_noise[t]
       )
       states.append(s_next)
       actions.append(action)
