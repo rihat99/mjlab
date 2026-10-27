@@ -1,4 +1,5 @@
-"""Terminal-state capture for SuperMimic: the sim state of envs right before auto-reset."""
+"""Terminal-state capture for SuperMimic: the sim state of envs right before their
+auto-reset."""
 
 from __future__ import annotations
 

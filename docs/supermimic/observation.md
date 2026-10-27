@@ -118,11 +118,17 @@ deploy controller turns the clip to the robot's heading at start (`motion_tracki
 the reference joints and the orientation error of 10 future frames 0.1 s apart (`sonic_release.yaml:48-49, 87-89`):
 
 ```python
-# gear_sonic/envs/manager_env/mdp/commands.py:1964-1976 (root_rot_dif_l_multi_future, line breaks joined)
-ref_root_quat = self.motion_lib.get_root_quat_w(self.future_motion_ids, self.future_time_steps)
+# gear_sonic/envs/manager_env/mdp/commands.py:1964-1976 (root_rot_dif_l_multi_future, reformatted)
+ref_root_quat = self.motion_lib.get_root_quat_w(
+  self.future_motion_ids, self.future_time_steps
+)
 root_rot_dif = quat_mul(
-    quat_inv(self.robot_anchor_quat_w.view(self.num_envs, 1, 4).repeat(1, self.num_future_frames, 1)),
-    ref_root_quat.view(self.num_envs, self.num_future_frames, 4),
+  quat_inv(
+    self.robot_anchor_quat_w.view(self.num_envs, 1, 4).repeat(
+      1, self.num_future_frames, 1
+    )
+  ),
+  ref_root_quat.view(self.num_envs, self.num_future_frames, 4),
 )
 mat = matrix_from_quat(root_rot_dif)
 root_rot_dif_l_mat = mat[..., :2].reshape(mat.shape[0], -1)
