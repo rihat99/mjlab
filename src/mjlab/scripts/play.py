@@ -34,9 +34,7 @@ class PlayConfig:
   video_height: int | None = None
   video_width: int | None = None
   camera: int | str | None = None
-  viewer: Literal["auto", "native", "viser", "none"] = "auto"
-  """``none`` runs ``video_length`` steps headless (recording if ``video``), then
-  exits."""
+  viewer: Literal["auto", "native", "viser"] = "auto"
   no_terminations: bool = False
   """Disable all termination conditions (useful for viewing motions with dummy agents)."""
 
@@ -193,12 +191,7 @@ def run_play(task_id: str, cfg: PlayConfig):
   else:
     resolved_viewer = cfg.viewer
 
-  if resolved_viewer == "none":
-    obs = env.get_observations()
-    for _ in range(cfg.video_length):
-      with torch.no_grad():
-        obs = env.step(policy(obs))[0]
-  elif resolved_viewer == "native":
+  if resolved_viewer == "native":
     NativeMujocoViewer(env, policy).run()
   elif resolved_viewer == "viser":
     ViserPlayViewer(env, policy, checkpoint_manager=ckpt_manager).run()

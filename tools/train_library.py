@@ -1,4 +1,4 @@
-"""Train, play or evaluate one SuperMimic tracker on a motion library, fully local.
+"""Train or evaluate one SuperMimic tracker on a motion library, fully local.
 
 The task is ``Mjlab-Tracking-Flat-Unitree-G1-SuperMimic`` (``TASK``).
 Train on the library = the kept clips of <motions-dir>/manifest.json if there is one
@@ -28,22 +28,17 @@ checkpoint of the run dir (default: the newest run) that has no JSON yet
 (``-- --overwrite True``: every one), in one process. ``--watch`` also evaluates
 each checkpoint the training writes, until the training process --pid has exited
 (it first waits for the run's params/env.yaml, written once the training env is
-built).
-Play headless (no viewer): one clip of the run's library, records
-<run dir>/videos/play/rl-video-step-0.mp4 (overwritten by the next play of that run),
-one clip pass by default; it defaults to the newest run and its last checkpoint:
+built):
 
     $PY tools/train_library.py --eval [--run-dir DIR | --checkpoint FILE]
     $PY tools/train_library.py --eval --watch --run-dir DIR --pid TRAIN_PID
-    $PY tools/train_library.py --play --clip walk1_subject1 [--run-dir DIR] \\
-        [--checkpoint FILE] [--video-length N]
 
-Play and evaluate use the library the run's params/env.yaml records (its clip list or
+Evaluation uses the library the run's params/env.yaml records (its clip list or
 tuple of npz paths); if that list or one of its files is not on this machine (a run
-made elsewhere, e.g. the shipped checkpoints/seed), they stop and ask for
+made elsewhere, e.g. the shipped checkpoints/seed), it stops and asks for
 ``--motions-dir``, whose library (as for training) then replaces the recorded one.
 
-Anything after ``--`` is passed to mjlab's train / play / evaluate_library unchanged
+Anything after ``--`` is passed to mjlab's train / evaluate_library unchanged
 (e.g. ``-- --agent.save-interval 100``; a repeated flag overrides the launcher's).
 ``--print-cmd`` prints the command and exits. The mjlab process replaces this one
 (exec), so a nohup'ed PID is the trainer's PID. The mjlab commands are the ones
@@ -63,7 +58,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import yaml
 from paths import LOG_ROOT, MOTIONS_DIR
 
@@ -168,13 +162,6 @@ def resolve_run_dir(args: argparse.Namespace) -> Path:
   return runs[-1]
 
 
-def resolve_checkpoint(args: argparse.Namespace) -> Path:
-  """``args.checkpoint``, else the last checkpoint of ``resolve_run_dir(args)``."""
-  if args.checkpoint is not None:
-    return args.checkpoint.resolve()
-  return latest_checkpoint(resolve_run_dir(args))
-
-
 def wait_for_params(run_dir: Path, pid: int) -> None:
   """Wait until mjlab has written ``run_dir/params/env.yaml`` (once the training env
   is built: seconds on LAFAN1, 7-10 min on BONES-SEED) while process ``pid`` runs."""
@@ -215,15 +202,104 @@ def recorded_library(run_dir: Path) -> tuple[list[Path], Path | None]:
   return library, clip_list
 
 
+def train_command(
+  args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> list[str]:
+  """mjlab ``train`` on the library of ``--motions-dir`` (or its ``--clips``), after
+  writing the library's record and clip list under ``--log-root``."""
+  if args.iters is None:
+    parser.error("training needs --iters")
+  if args.watch or args.pid is not None:
+    parser.error("--watch and --pid are for --eval")
+  motions_dir = (args.motions_dir or MOTIONS_DIR).resolve()
+  if args.clips is None:
+    motions = kept_clips(motions_dir)
+  else:
+    motions = sorted(motions_dir / f"{clip}.npz" for clip in args.clips.split(","))
+  missing = [str(path) for path in motions if not path.is_file()]
+  if not motions or missing:
+    parser.error(f"no motions in {motions_dir} or missing: {missing}")
+  record = library_record(motions, args.log_root)
+  motion_list = library_list(motions, args.log_root)
+  if not args.print_cmd:
+    write_library_record(motions, record)
+    write_library_list(motions, motion_list)
+  print(f"[train_library] {len(motions)} clips, library record {record}", flush=True)
+  # mjlab writes runs to <--log-root>/<experiment-name>/<timestamp>[_<run-name>].
+  command = [
+    str(Path(sys.executable).parent / "train"),
+    TASK,
+    "--env.commands.motion.motion-file",
+    str(motion_list),
+    "--env.scene.num-envs",
+    str(args.num_envs),
+    "--agent.max-iterations",
+    str(args.iters),
+    "--agent.save-interval",
+    "4000",
+    "--agent.experiment-name",
+    args.log_root.name,
+    "--agent.logger",
+    "local",
+    "--log-root",
+    str(args.log_root.parent),
+  ]
+  if args.tag:
+    command += ["--agent.run-name", args.tag]
+  return command
+
+
+def eval_command(
+  args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> list[str]:
+  """``evaluate_library`` of ``--checkpoint``, else of every checkpoint of the run, on
+  the run's recorded library or the library of ``--motions-dir``."""
+  if args.clips is not None:
+    parser.error("--clips is for training; evaluation uses the run's library")
+  if args.watch and (args.run_dir is None or args.checkpoint is not None):
+    parser.error("--watch needs --run-dir and no --checkpoint")
+  if args.pid is not None and not args.watch:
+    parser.error("--pid is for --watch")
+  if args.checkpoint is None:
+    run_dir = resolve_run_dir(args)
+    evaluated = ["--run-dir", str(run_dir)]
+  else:
+    checkpoint = args.checkpoint.resolve()
+    run_dir = checkpoint.parent
+    evaluated = ["--checkpoint-file", str(checkpoint)]
+  if args.watch and args.pid is not None and not args.print_cmd:
+    wait_for_params(run_dir, args.pid)
+  if args.motions_dir is None:
+    library, motion_list = recorded_library(run_dir)
+  else:
+    library, motion_list = kept_clips(args.motions_dir.resolve()), None
+  if motion_list is None:
+    motion_list = library_list(library, args.log_root)
+    if not args.print_cmd:
+      write_library_list(library, motion_list)
+  command = [
+    sys.executable,
+    "-m",
+    "mjlab.tasks.tracking.scripts.evaluate_library",
+    TASK,
+    *evaluated,
+    "--motion-files",
+    str(motion_list),
+    "--num-envs",
+    str(args.num_envs),
+  ]
+  if args.watch:
+    command += ["--watch", "True"]
+  if args.pid is not None:
+    command += ["--pid", str(args.pid)]
+  return command
+
+
 def main() -> None:
   parser = argparse.ArgumentParser(
     description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
   )
-  mode = parser.add_mutually_exclusive_group()
-  mode.add_argument(
-    "--play", action="store_true", help="headless video of a checkpoint on one --clip"
-  )
-  mode.add_argument(
+  parser.add_argument(
     "--eval",
     action="store_true",
     help="library metrics JSON of --checkpoint, else of every checkpoint of the run",
@@ -234,17 +310,16 @@ def main() -> None:
     "--num-envs",
     type=int,
     default=4096,
-    help="training envs (eval: clips played at once, play: 1)",
+    help="training envs (eval: clips played at once)",
   )
   parser.add_argument("--tag", default="", help="suffix of the run dir name")
   parser.add_argument(
     "--clips", help="train: comma-separated clip ids of <motions-dir> (default: all)"
   )
-  parser.add_argument("--clip", help="play: clip id of the run's library")
   parser.add_argument(
     "--motions-dir",
     type=Path,
-    help=f"npz folder of the library (train default: {MOTIONS_DIR}; play/eval: "
+    help=f"npz folder of the library (train default: {MOTIONS_DIR}; eval: "
     "replaces the run's recorded library)",
   )
   parser.add_argument(
@@ -254,13 +329,10 @@ def main() -> None:
     help="folder of the runs (default: %(default)s; LAFAN1: runs/lafan)",
   )
   parser.add_argument(
-    "--run-dir", type=Path, help="play/eval: run dir (default: newest run)"
+    "--run-dir", type=Path, help="eval: run dir (default: newest run)"
   )
   parser.add_argument(
-    "--checkpoint", type=Path, help="play/eval: checkpoint (default: last in run dir)"
-  )
-  parser.add_argument(
-    "--video-length", type=int, help="play: steps recorded (default: one clip pass)"
+    "--checkpoint", type=Path, help="eval: one checkpoint instead of the run's"
   )
   parser.add_argument(
     "--watch",
@@ -275,112 +347,8 @@ def main() -> None:
   if extra and extra[0] == "--":
     extra = extra[1:]
   args.log_root = args.log_root.resolve()
-  motions_dir = None if args.motions_dir is None else args.motions_dir.resolve()
-
-  bin_dir = Path(sys.executable).parent
-  if not (args.play or args.eval):
-    if args.iters is None:
-      parser.error("training needs --iters")
-    motions_dir = motions_dir or MOTIONS_DIR
-    if args.clips is None:
-      motions = kept_clips(motions_dir)
-    else:
-      motions = sorted(motions_dir / f"{clip}.npz" for clip in args.clips.split(","))
-    missing = [str(path) for path in motions if not path.is_file()]
-    if not motions or missing:
-      parser.error(f"no motions in {motions_dir} or missing: {missing}")
-    record = library_record(motions, args.log_root)
-    motion_list = library_list(motions, args.log_root)
-    if not args.print_cmd:
-      write_library_record(motions, record)
-      write_library_list(motions, motion_list)
-    # mjlab writes runs to <--log-root>/<experiment-name>/<timestamp>[_<run-name>].
-    command = [
-      str(bin_dir / "train"),
-      TASK,
-      "--env.commands.motion.motion-file",
-      str(motion_list),
-      "--env.scene.num-envs",
-      str(args.num_envs),
-      "--agent.max-iterations",
-      str(args.iters),
-      "--agent.save-interval",
-      "4000",
-      "--agent.experiment-name",
-      args.log_root.name,
-      "--agent.logger",
-      "local",
-      "--log-root",
-      str(args.log_root.parent),
-    ]
-    if args.tag:
-      command += ["--agent.run-name", args.tag]
-    print(f"[train_library] {len(motions)} clips, library record {record}", flush=True)
-  else:
-    if args.clips is not None:
-      parser.error("--clips is for training; play/eval use the run's training library")
-    if args.watch and (
-      not args.eval or args.run_dir is None or args.checkpoint is not None
-    ):
-      parser.error("--watch needs --eval and --run-dir, no --checkpoint")
-    if args.pid is not None and not args.watch:
-      parser.error("--pid is for --watch")
-    if args.eval and args.checkpoint is None:
-      run_dir = resolve_run_dir(args)
-      evaluated = ["--run-dir", str(run_dir)]
-    else:
-      checkpoint = resolve_checkpoint(args)
-      run_dir = checkpoint.parent
-      evaluated = ["--checkpoint-file", str(checkpoint)]
-    if args.watch and args.pid is not None and not args.print_cmd:
-      wait_for_params(run_dir, args.pid)
-    if motions_dir is None:
-      library, motion_list = recorded_library(run_dir)
-    else:
-      library, motion_list = kept_clips(motions_dir), None
-    if args.eval:
-      if motion_list is None:
-        motion_list = library_list(library, args.log_root)
-        if not args.print_cmd:
-          write_library_list(library, motion_list)
-      command = [
-        sys.executable,
-        "-m",
-        "mjlab.tasks.tracking.scripts.evaluate_library",
-        TASK,
-        *evaluated,
-        "--motion-files",
-        str(motion_list),
-        "--num-envs",
-        str(args.num_envs),
-      ]
-      if args.watch:
-        command += ["--watch", "True"]
-      if args.pid is not None:
-        command += ["--pid", str(args.pid)]
-    else:
-      clips = {path.stem: path for path in library}
-      if args.clip not in clips:
-        parser.error(f"--play needs a --clip of the run's library: {sorted(clips)}")
-      motion = clips[args.clip]
-      video_length = args.video_length or len(np.load(motion)["joint_pos"])
-      command = [
-        str(bin_dir / "play"),
-        TASK,
-        "--checkpoint-file",
-        str(checkpoint),
-        "--motion-file",
-        str(motion),
-        "--num-envs",
-        "1",
-        "--viewer",
-        "none",
-        "--video",
-        "True",
-        "--video-length",
-        str(video_length),
-      ]
-  command += extra
+  builder = eval_command if args.eval else train_command
+  command = builder(args, parser) + extra
 
   # EGL device ids are physical GPU ids (EGL ignores CUDA_VISIBLE_DEVICES): without
   # MUJOCO_EGL_DEVICE_ID, video rendering lands on GPU 0.
