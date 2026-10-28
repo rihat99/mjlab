@@ -54,30 +54,37 @@ Evaluation follows the paper (App. F.1): every clip played once from its first f
 policy, friction 1.0, no noise or randomisation. A clip fails when the pelvis height error exceeds 0.25 m or
 its tilt error 0.8; the normalised return divides the summed reward by the maximum over the whole clip.
 The policy in `checkpoints/seed` is iteration 144,000 of a 160k-iteration run, the checkpoint with the fewest
-failed clips. Over all 129,889 clips: **7 failed** (a repeat evaluation gives 15, 6 of them the same:
-MuJoCo Warp is not bitwise deterministic, and these clips sit at the edge of the termination threshold) and
-a mean normalised return of **0.940** in both evaluations.
+failed clips in the evaluations run during training. Over all 129,889 clips: **7–15 failed** in two
+evaluations (6 in both) and a mean normalised return of **0.940** in each
+(`checkpoints/seed/eval_library_model_144000.json` and `_repeat.json`, kept locally). Picking the lowest of 40
+noisy counts picks a lucky draw: by the mean of two evaluations, 124,000 (8 and 10 failed) and 136,000 (10 and
+10) are at least as good, and two more runs of the 16 clips that failed at 144,000 fail 9 and 11 of them
+([failures.md](docs/supermimic/failures.md)); we kept the rule. The counts move because evaluations are not
+bit-reproducible across processes: the same clip returns 0.918 in one and 0.13 in another
+(`Stop_backward_Walk_001__A017`). Candidate sources are MuJoCo Warp's kernels and non-deterministic torch
+kernels (`configure_torch_backends` defaults to `deterministic=False`, `src/mjlab/utils/torch.py:5`); the
+cause is not isolated.
 
 Failed motions per group of the paper's Table A.8. Our groups are found by motion name; flips and
 lying/standing up only approximate the paper's sets, the dance routine cannot be identified, and the last
 three groups are ours.
 
-| motion group (clips here / paper) | here: failed | here: mean return | SONIC | SuperMimic 1 GPU × 3 h | SuperMimic 2 GPUs × 9.8 h |
+| motion group (clips here / paper) | here: failed, two evaluations | here: mean return | SONIC | SuperMimic 1 GPU × 3 h | SuperMimic 2 GPUs × 9.8 h |
 |---|---|---|---|---|---|
-| side rolls (22 / 22) | 0 | 0.827 | 22 | 2 | 0 |
-| flips (54 / 44) | 1 | 0.801 | 44 | 1 | 0 |
-| fire-in-the-hole turns (20 / 20) | 0 | 0.847 | 3 | 3 | 0 |
-| crossed legs (10 / 10) | 0 | 0.827 | 9 | 0 | 0 |
-| lying, resting and standing up (102 / 99) | 0 | 0.877 | 28 | 8 | 0 |
-| broad jumps (24 / 24) | 0 | 0.846 | 15 | 0 | 0 |
+| side rolls (22 / 22) | 0, 0 | 0.827 | 22 | 2 | 0 |
+| flips (54 / 44) | 1, 2 | 0.801 | 44 | 1 | 0 |
+| fire-in-the-hole turns (20 / 20) | 0, 0 | 0.847 | 3 | 3 | 0 |
+| crossed legs (10 / 10) | 0, 2 | 0.826 | 9 | 0 | 0 |
+| lying, resting and standing up (102 / 99) | 0, 0 | 0.877 | 28 | 8 | 0 |
+| broad jumps (24 / 24) | 0, 1 | 0.846 | 15 | 0 | 0 |
 | dance routine (– / 8) | – | – | 8 | 0 | 0 |
-| cartwheels (112 / –) | 0 | 0.841 | – | – | – |
-| handstands (160 / –) | 4 | 0.624 | – | – | – |
-| kozak dance (90 / –) | 0 | 0.591 | – | – | – |
-| all other (129,295 / 129,287) | 2 | 0.941 | 50 | 11 | 0 |
-| **total (129,889 / 129,514)** | **7** | **0.940** | **179** | **25** | **0** |
+| cartwheels (112 / –) | 0, 0 | 0.841 | – | – | – |
+| handstands (160 / –) | 4, 5 | 0.624 | – | – | – |
+| kozak dance (90 / –) | 0, 0 | 0.591 | – | – | – |
+| all other (129,295 / 129,287) | 2, 5 | 0.941 | 50 | 11 | 0 |
+| **total (129,889 / 129,514)** | **7, 15** | **0.940** | **179** | **25** | **0** |
 
-The repeat evaluation fails 2 flips, 2 crossed-legs clips, 1 broad jump, 5 handstands and 5 others.
+Mean returns are the first evaluation's; the repeat's are within 0.012 of them except crossed legs (0.779).
 
 Against the policy this fork shipped before, which read the heading term in the observation (99 values per
 step) and was trained and evaluated, with the same schedule, on the 129,951 clips from before our three
@@ -88,8 +95,10 @@ filter rules:
 | heading in the goal (this one) | 129,889 | 7, 15 | 7, 15 | 0.940 |
 | heading in the observation | 129,951 | 7, 10 | 6, 9 | 0.930 |
 
-The earlier policy failed no clip of the named groups and its failures were all in "all other"; this one
-fails four handstands, a flip, a jog with butt kicks and a turn on all fours, and gains 0.01 of return.
+The earlier policy failed no clip of the named groups and its failures were all in "all other". This one
+fails four handstands, a flip, a jog with butt kicks and a turn on all fours in the first evaluation; the
+repeat passes one of the handstands and adds two crossed-legs clips, a broad jump, a second flip, two
+handstands, two butt-kick jogs and a backward walk. It gains 0.01 of return.
 
 Budget: here one RTX PRO 6000 Blackwell, 144,000 iterations at 4096 envs, 8.5 h of training at the trainer's
 own speed (11.3 h wall-clock, as an evaluation of every checkpoint shared the GPU). The paper: SONIC is the
@@ -97,11 +106,11 @@ released checkpoint (128 L40 GPUs for 168 h); SuperMimic 3 h on one H100 or 9.8 
 
 ![Normalised return and failed clips of every checkpoint, against iteration and training hours, and failed clips per motion group](docs/media/library_eval_curves_annotated.png)
 
-The return reaches 0.95 by iteration 40,000 and then moves between 0.929 and 0.950, while the failed count
-falls from 1,549 at 4,000 to 7 at 144,000. The 160 handstands fail as a block until iteration 80,000 and are
-learned between 84,000 and 92,000. From 108,000 on, the failed count moves between 7 and 24 from one
-checkpoint to the next. Which clips fail and why: [failures.md](docs/supermimic/failures.md), an analysis
-of the earlier policy's failures.
+The return reaches 0.95 by about iteration 76,000 (0.949 at 40,000) and from 40,000 on moves between 0.929 and
+0.950, while the failed count falls from 1,549 at 4,000 to 7 at 144,000 (15 in the repeat). Nearly all of the
+160 handstands fail (152 to 160) until iteration 80,000; they are learned between 84,000 and 92,000. From
+108,000 on, the failed count moves between 7 and 24 from one checkpoint to the next. Which clips fail and why:
+[failures.md](docs/supermimic/failures.md), an analysis of the earlier policy's failures.
 
 How well the world model predicts the simulator: the policy acts from the same simulated state in both,
 on four clips, four start frames each (mean error of imagination vs simulation; `tools/imagine_video.py`).

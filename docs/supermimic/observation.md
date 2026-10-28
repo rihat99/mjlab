@@ -298,8 +298,9 @@ the first 60 s. Mean normalised step return over the first 5 / 10 / 15 / 60 s: n
   fails 7 and 15 clips in two full evaluations (6 in both) with mean normalised return 0.940 in each. The observation
   layout's policy at the same iteration, trained on the 129,951 clips from before three filter rules, failed 7 and 10
   (6 and 9 of the 129,889 clips both libraries share) with 0.930. So on BONES-SEED, too, the two layouts track about
-  equally well; the goal layout's failures are mostly handstands, the observation layout's were all outside the
-  named motion groups. One run per layout, and the libraries differ by 62 clips.
+  equally well; handstands are 6 of the 16 clips the goal layout fails in either evaluation, and the observation
+  layout's failures were all outside the named motion groups. One run per layout, and the libraries differ by 62
+  clips.
 - **One seed per arm.** The goal arm's 0.01 deficit per survived step and its faster drift may be this seed; a second
   seed of both arms (about 1 h each on one GPU) would tell.
 - **Position drift.** Neither layout observes position, so both drift, the goal arm faster: its mean root-position

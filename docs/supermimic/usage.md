@@ -88,8 +88,11 @@ error exceeds 0.25 m or its tilt error 0.8. The JSON next to the checkpoint hold
 per clip length and per survived step (mean over clips and frame-weighted), the failed clips, one record
 per clip with the terminations that fired and the return per reward term, the run's training wall-clock at
 the checkpoint and, under `provenance`, the evaluating commit (`dirty` flag) and the robot's collision
-setting. MuJoCo Warp is not bitwise deterministic across processes: a repeat evaluation can move a few
-clips between failed and not failed.
+setting. Evaluations are not bit-reproducible across processes: the same clip can return 0.918 in one and
+0.13 in another (`Stop_backward_Walk_001__A017`), and at 144k about ten of the 16 affected clips moved
+between failed and not failed in two evaluations. Candidate sources are MuJoCo Warp's kernels and
+non-deterministic torch kernels (`configure_torch_backends` defaults to `deterministic=False`,
+`src/mjlab/utils/torch.py:5`); not isolated.
 
 ```bash
 $PY tools/train_library.py --eval --gpu 0 [--run-dir RUN | --checkpoint RUN/model_160000.pt]
@@ -150,8 +153,9 @@ $PY tools/imagine_video.py --run-dir checkpoints/seed --clip cartwheel_R_003__A1
 ## The shipped checkpoint folder
 
 `checkpoints/seed/` holds `model_<it>.pt` (policy, critic, world model and reset-sampler state, without
-optimiser states, to stay under GitHub's 100 MB file limit) and the run's `params/`. Its evaluation JSON
-and `figures/` stay local (gitignored). It serves as `--run-dir` for `train_library.py --eval`,
+optimiser states, to stay under GitHub's 100 MB file limit) and the run's `params/`. Its evaluation JSONs
+(`eval_library_model_144000.json` and a repeat, `eval_library_model_144000_repeat.json`) and `figures/`
+stay local (gitignored). It serves as `--run-dir` for `train_library.py --eval`,
 `view.py` and `imagine_video.py`; its `params/env.yaml` records the clip list under the training
 machine's paths, so on another machine add `--motions-dir data/motions/seed` (evaluation then uses the
 kept clips of `manifest.json`: 129,889 with the current filter, the library the shipped checkpoint was
@@ -185,7 +189,8 @@ trained and evaluated on). Loading it whole
 On one RTX PRO 6000 (Blackwell), 4096 envs: LAFAN1 about 0.21 s per iteration; BONES-SEED 0.21 s per
 iteration and about 44 GB of GPU memory, 9.4 h of training for 160k iterations, after 15-70 min of
 library loading (CPU-bound). A full-library watch evaluation needs another 29 GB and about 10 min per
-checkpoint while the trainer runs (4.5 min alone), and slows the trainer to about 0.35 s per iteration.
+checkpoint while the trainer runs (4.3 min, 258 s, without GPU sharing), and slows the trainer to about
+0.35 s per iteration.
 
 ## Contact budget
 

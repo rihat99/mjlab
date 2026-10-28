@@ -26,13 +26,26 @@ clips, §3.5, and two handstands, §3.2), and the families recur (handstands, fl
 butt-kick jogs and the turn on all fours are new. Over its 15 checkpoints from 104k to 160k plus the repeat, the
 current run fails 168 distinct clips in 262 events (here: 315 clips, 468 events); 57 of them are in this note's union.
 
+How stable the current policy's 16 failures are: two more evaluations of just these 16 clips with
+`checkpoints/seed/model_144000.pt` (one process each, 16 environments) fail 9 and 11 of them. Over the four runs, 5
+clips fail in 4 of 4 (`flip_180_R_003__A304`, `handstand_ff_start_270_R_001__A304`, `jog_butt_kick_R_loop_002__A362`,
+`show_bicep_R_on_all_fours_360_start_R_idle_right_R_002__A474_M`, `turn_handstand_270_R_001__A304`), 5 in 3 of 4
+(`Stop_backward_Walk_001__A017`, `broad_jump_002__A362_M`, `flip_090_003__A304`, `handstand_ff_loop_270_R_102__A304_M`,
+`jog_butt_kick_R_start_002__A362`), 1 in 2 of 4 (`handstand_ff_stop_360_R_002__A304`) and the other 5 in 1 of 4. A run
+fails 10.5 of these 16 on average; the first evaluation's 7 is the lowest of the four draws (7, 15, 9, 11). No clip
+returns the same value in any two runs (`Stop_backward_Walk_001__A017`: 0.918 once, 0.13 three times). Sources: the full
+evaluations `runs/seed/2026-10-27_22-48-41_seed_goal_heading_filtered/eval_library_model_144000.json` and
+`eval_library_model_144000_repeat.json`; the 16-clip runs `X_final_review/eval16_r1.json` and `eval16_r2.json` in the
+diagnosis notes (`evaluate_library --checkpoint-file checkpoints/seed/model_144000.pt`).
+
 ## 1. Headline
 
 - The analysed checkpoint fails 7 and 10 of 129,951 clips in two full evaluations (11 distinct clips, 6 in both).
 - Every checkpoint from 104k to 160k fails 7 to 53 clips. Over 16 evaluations, 315 clips (238 motions) fail at
   least once, 468 events in total. 224 of the 315 fail only once; no clip fails in more than 6 of the 16.
-- Re-running a checkpoint repeats 70 % of its failures (36–86 % per checkpoint); the rest is simulator
-  non-determinism. Which skills fail depends strongly on the checkpoint.
+- Re-running a checkpoint repeats 70 % of its failures (36–86 % per checkpoint); the rest move because runs are
+  not bit-reproducible (source not isolated; [usage.md](usage.md#evaluate)). Which skills fail depends strongly on
+  the checkpoint.
 - Few failures come from props: one wall-run motion. Most come from a few families of very hard motions or of
   retargets that sink into the floor or self-intersect. The largest family (kneel loops) is a checkpoint-dependent
   toppling whose trigger is still unknown.
@@ -346,7 +359,7 @@ exactly these 62 clips.
 The change removes the one missed prop, one dubious motion type and 30 clips with joint-speed spikes. It does not
 touch the dominant failures: kneel loops (35 % of events), handstands (19 %), floor sitting, lying and crawling (13
 %), high jumps (12 %). Those need re-retargeting or a training change, not a filter. It matters only for a
-policy trained on the new library, as the current one is.
+policy trained on the filtered library, as the current one is.
 
 Rules counted and rejected:
 
