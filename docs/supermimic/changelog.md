@@ -48,6 +48,9 @@ Changes of this fork relative to upstream mjlab at `45b1e263e`. Upstream's own c
   100 rad/s to the paper's), the training and evaluation launcher,
   evaluation reports, and video rendering of a policy and of its world model (see `usage.md`).
 - `MjlabViserScene.ghost_cast_shadow`: ghost meshes can cast shadows.
+- `checkpoints/seed/`: a BONES-SEED policy of the task above, iteration 144,000 of a 160k-iteration run
+  on the 129,889-clip library (7 and 15 failed clips in two full evaluations, mean normalised return
+  0.940), without optimiser states, with the run's `params/`.
 
 ## Changed
 

@@ -8,14 +8,14 @@ obs_groups:
   - critic
 save_interval: 4000
 experiment_name: seed
-run_name: seed
+run_name: seed_goal_heading_filtered
 logger: local
 resume: false
 load_run: .*
 load_checkpoint: model_.*.pt
 clip_actions: null
 log_interval: 50
-model_interface: mjlab.tasks.tracking.supermimic.model_interface:TrackingModelInterface
+model_interface: mjlab.tasks.tracking.rl.model_interface:TrackingModelInterface
 world_model:
   hidden_dims: !!python/tuple
   - 2048
