@@ -1,7 +1,8 @@
 # Why a few clips fail
 
-The shipped SEED policy (`checkpoints/seed/model_144000.pt`) tracks all but about ten of the 129,951 clips of its
-library (the library before the filter change of §5).
+This note analyses the BONES-SEED policy this fork shipped before the current one: iteration 144k of
+`runs/seed/2026-10-26_17-43-21_seed`, with the heading term in the observation (99 values per step), trained and
+evaluated on 129,951 clips (the library before the filter change of §5). It tracks all but about ten of them.
 This note asks which clips fail, how stable that set is, and why. It assumes you know the method; the [explainer
 page](index.html) covers training and evaluation, and [observation.md](observation.md) covers what the actor
 observes.
@@ -12,9 +13,22 @@ statistics computed for this diagnosis. Sources named under the tables live in t
 holds the data, `X_fail_review/` an adversarial review of the first reading. A failure *event* is one clip failing
 in one evaluation.
 
+**The current policy** (`checkpoints/seed/model_144000.pt`: heading in the goal, iteration 144k of
+`runs/seed/2026-10-27_22-48-41_seed_goal_heading_filtered`, 129,889 clips) was not analysed here. It fails 7 clips in
+its first full evaluation and 15 in a repeat, 6 in both: `flip_180_R_003__A304`, `handstand_ff_loop_270_R_102__A304_M`,
+`handstand_ff_start_270_R_001__A304`, `jog_butt_kick_R_loop_002__A362`,
+`show_bicep_R_on_all_fours_360_start_R_idle_right_R_002__A474_M` and `turn_handstand_270_R_001__A304`; the first
+evaluation adds `handstand_ff_stop_360_R_002__A304`, the repeat two crossed-legs clips (`crossed_legs_R_001__A430`,
+`_A432_M`), `broad_jump_002__A362_M`, `flip_090_003__A304`, two handstands, two more butt-kick jogs of actor A362 and
+`Stop_backward_Walk_001__A017`. None of the eleven clips the earlier policy failed at 144k (§4.4) fails in either
+evaluation; the wall run has left the library. Four of the 16 are in the union analysed below (the two crossed-legs
+clips, §3.5, and two handstands, §3.2), and the families recur (handstands, flips, jumps, cross-legged sitting); the
+butt-kick jogs and the turn on all fours are new. Over its 15 checkpoints from 104k to 160k plus the repeat, the
+current run fails 168 distinct clips in 262 events (here: 315 clips, 468 events); 57 of them are in this note's union.
+
 ## 1. Headline
 
-- The shipped checkpoint fails 7 and 10 of 129,951 clips in two full evaluations (11 distinct clips, 6 in both).
+- The analysed checkpoint fails 7 and 10 of 129,951 clips in two full evaluations (11 distinct clips, 6 in both).
 - Every checkpoint from 104k to 160k fails 7 to 53 clips. Over 16 evaluations, 315 clips (238 motions) fail at
   least once, 468 events in total. 224 of the 315 fail only once; no clip fails in more than 6 of the 16.
 - Re-running a checkpoint repeats 70 % of its failures (36–86 % per checkpoint); the rest is simulator
@@ -315,7 +329,7 @@ as corrected by `X_fail_review/findings.md`.
 
 ## 5. Filter change
 
-Three additions to `tools/filter_seed.py`, counted on the 129,951 clips of the shipped policy's library; applied
+Three additions to `tools/filter_seed.py`, counted on the 129,951 clips of the analysed policy's library; applied
 on 2026-10-27, they leave 129,889 clips (263.7 h). No clip hits two rules.
 
 | rule | clips removed | hours | failing clips covered | events covered | why |
@@ -332,7 +346,7 @@ exactly these 62 clips.
 The change removes the one missed prop, one dubious motion type and 30 clips with joint-speed spikes. It does not
 touch the dominant failures: kneel loops (35 % of events), handstands (19 %), floor sitting, lying and crawling (13
 %), high jumps (12 %). Those need re-retargeting or a training change, not a filter. It matters only for a
-policy trained on the new library; the retrain started on 2026-10-27 is the first.
+policy trained on the new library, as the current one is.
 
 Rules counted and rejected:
 

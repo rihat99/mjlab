@@ -12,8 +12,8 @@ pass its filters on a single GPU; the results against the paper are below.
 More clips (click to play): [side roll](docs/media/sim_side_roll.mp4) ·
 [flip](docs/media/sim_flip.mp4) · [handstand](docs/media/sim_handstand.mp4) ·
 [standing up](docs/media/sim_stand_up.mp4) · [walk](docs/media/sim_walk.mp4) ·
-[wave](docs/media/sim_wave.mp4) · two failures: [high jump](docs/media/sim_failed_high_jump.mp4),
-[wall jump](docs/media/sim_failed_wall_jump.mp4).
+[wave](docs/media/sim_wave.mp4) · two failures: [handstand](docs/media/sim_failed_handstand.mp4),
+[butt-kick jog](docs/media/sim_failed_jog.mp4).
 
 ## What SuperMimic is
 
@@ -32,7 +32,7 @@ How it works here, step by step, with the observation, goal, noise and timing de
 
 | item | paper | here | why |
 |---|---|---|---|
-| Heading | does not say where the policy learns its heading error; the actor reads Table A.1 (93 values per step) | actor exactly Table A.1 (93 × 10 steps); the goal adds, for each of the 10 goal frames, the reference pelvis orientation seen from the robot pelvis (60 values, SONIC's form; goal 790) | the 730 reference values are written in the reference's heading frame, so without this the policy cannot see its heading error and drifts (94° after 60 s on LAFAN1). In the observation instead (99 per step) it tracks equally well ([observation.md](docs/supermimic/observation.md)) |
+| Heading | does not say where the policy learns its heading error; the actor reads Table A.1 (93 values per step) | actor exactly Table A.1 (93 × 10 steps); the goal adds, for each of the 10 goal frames, the reference pelvis orientation seen from the robot pelvis (60 values, SONIC's form; goal 790) | the 730 reference values are written in the reference's heading frame, so without this the policy cannot see its heading error and drifts (94° after 60 s on LAFAN1; [observation.md](docs/supermimic/observation.md)) |
 | Self-collision | self-collision penalty removed (App. A) | full robot self-collision simulated, no penalty | as on hardware |
 | Friction | μ ~ U[0.3, 1.2] (Table A.3) | on every robot collision geom, ground at 0.3 in training | MuJoCo uses the larger friction of two geoms: with a ground of 1.0 only the feet would feel the sampled value |
 | Torso CoM offset | per episode, part of the sim context | sampled once per env at startup | changing it runs MuJoCo Warp's `set_const` over all worlds; per episode it doubles the env step (18 → 35 ms at 4096 envs) |
@@ -50,18 +50,13 @@ How it works here, step by step, with the observation, goal, noise and timing de
 
 ## Results
 
-> These results are from the policy trained with the heading term in the observation (99 values per step,
-> iteration 144,000 of a 160k-iteration run, the checkpoint in `checkpoints/seed` until the retrain with the
-> layout above replaces it), trained and evaluated on the 129,951-clip library from before the three filter
-> rules of ours (`off_wall`, `inchworm`, joint speed).
-
-<!-- S_retrain results here -->
-
 Evaluation follows the paper (App. F.1): every clip played once from its first frame with the deterministic
 policy, friction 1.0, no noise or randomisation. A clip fails when the pelvis height error exceeds 0.25 m or
 its tilt error 0.8; the normalised return divides the summed reward by the maximum over the whole clip.
-Over all 129,951 clips: **7 failed** (a repeat evaluation gives 10: MuJoCo Warp is not bitwise
-deterministic) and a mean normalised return of **0.930**.
+The policy in `checkpoints/seed` is iteration 144,000 of a 160k-iteration run, the checkpoint with the fewest
+failed clips. Over all 129,889 clips: **7 failed** (a repeat evaluation gives 15, 6 of them the same:
+MuJoCo Warp is not bitwise deterministic, and these clips sit at the edge of the termination threshold) and
+a mean normalised return of **0.940** in both evaluations.
 
 Failed motions per group of the paper's Table A.8. Our groups are found by motion name; flips and
 lying/standing up only approximate the paper's sets, the dance routine cannot be identified, and the last
@@ -69,43 +64,59 @@ three groups are ours.
 
 | motion group (clips here / paper) | here: failed | here: mean return | SONIC | SuperMimic 1 GPU × 3 h | SuperMimic 2 GPUs × 9.8 h |
 |---|---|---|---|---|---|
-| side rolls (22 / 22) | 0 | 0.814 | 22 | 2 | 0 |
-| flips (54 / 44) | 0 | 0.797 | 44 | 1 | 0 |
-| fire-in-the-hole turns (20 / 20) | 0 | 0.852 | 3 | 3 | 0 |
-| crossed legs (10 / 10) | 0 | 0.845 | 9 | 0 | 0 |
-| lying, resting and standing up (102 / 99) | 0 | 0.866 | 28 | 8 | 0 |
-| broad jumps (24 / 24) | 0 | 0.848 | 15 | 0 | 0 |
+| side rolls (22 / 22) | 0 | 0.827 | 22 | 2 | 0 |
+| flips (54 / 44) | 1 | 0.801 | 44 | 1 | 0 |
+| fire-in-the-hole turns (20 / 20) | 0 | 0.847 | 3 | 3 | 0 |
+| crossed legs (10 / 10) | 0 | 0.827 | 9 | 0 | 0 |
+| lying, resting and standing up (102 / 99) | 0 | 0.877 | 28 | 8 | 0 |
+| broad jumps (24 / 24) | 0 | 0.846 | 15 | 0 | 0 |
 | dance routine (– / 8) | – | – | 8 | 0 | 0 |
-| cartwheels (112 / –) | 0 | 0.830 | – | – | – |
-| handstands (160 / –) | 0 | 0.671 | – | – | – |
-| kozak dance (90 / –) | 0 | 0.590 | – | – | – |
-| all other (129,357 / 129,287) | 7 | 0.931 | 50 | 11 | 0 |
-| **total (129,951 / 129,514)** | **7** | **0.930** | **179** | **25** | **0** |
+| cartwheels (112 / –) | 0 | 0.841 | – | – | – |
+| handstands (160 / –) | 4 | 0.624 | – | – | – |
+| kozak dance (90 / –) | 0 | 0.591 | – | – | – |
+| all other (129,295 / 129,287) | 2 | 0.941 | 50 | 11 | 0 |
+| **total (129,889 / 129,514)** | **7** | **0.940** | **179** | **25** | **0** |
 
-Budget: here one RTX PRO 6000 Blackwell, 144,000 iterations at 4096 envs, 8.7 h of training at the trainer's
-own speed (11.5 h wall-clock, as an evaluation of every checkpoint shared the GPU). The paper: SONIC is the
+The repeat evaluation fails 2 flips, 2 crossed-legs clips, 1 broad jump, 5 handstands and 5 others.
+
+Against the policy this fork shipped before, which read the heading term in the observation (99 values per
+step) and was trained and evaluated, with the same schedule, on the 129,951 clips from before our three
+filter rules:
+
+| policy at iteration 144,000 | clips | failed, two evaluations | on the 129,889 shared clips | mean return |
+|---|---|---|---|---|
+| heading in the goal (this one) | 129,889 | 7, 15 | 7, 15 | 0.940 |
+| heading in the observation | 129,951 | 7, 10 | 6, 9 | 0.930 |
+
+The earlier policy failed no clip of the named groups and its failures were all in "all other"; this one
+fails four handstands, a flip, a jog with butt kicks and a turn on all fours, and gains 0.01 of return.
+
+Budget: here one RTX PRO 6000 Blackwell, 144,000 iterations at 4096 envs, 8.5 h of training at the trainer's
+own speed (11.3 h wall-clock, as an evaluation of every checkpoint shared the GPU). The paper: SONIC is the
 released checkpoint (128 L40 GPUs for 168 h); SuperMimic 3 h on one H100 or 9.8 h on two.
 
 ![Normalised return and failed clips of every checkpoint, against iteration and training hours, and failed clips per motion group](docs/media/library_eval_curves_annotated.png)
 
-The return peaks at 0.952 at iteration 52,000 while 231 clips still fail (all 160 handstands among them);
-later checkpoints learn the hard clips and give up a little return on ordinary ones. From iteration 104,000
-on, the failed count moves between 7 and 53 from one checkpoint to the next. Which clips fail and why:
-[failures.md](docs/supermimic/failures.md).
+The return reaches 0.95 by iteration 40,000 and then moves between 0.929 and 0.950, while the failed count
+falls from 1,549 at 4,000 to 7 at 144,000. The 160 handstands fail as a block until iteration 80,000 and are
+learned between 84,000 and 92,000. From 108,000 on, the failed count moves between 7 and 24 from one
+checkpoint to the next. Which clips fail and why: [failures.md](docs/supermimic/failures.md), an analysis
+of the earlier policy's failures.
 
 How well the world model predicts the simulator: the policy acts from the same simulated state in both,
 on four clips, four start frames each (mean error of imagination vs simulation; `tools/imagine_video.py`).
 
 | clip | root position, step 32 | joints, step 32 | root position, step 128 | joints, step 128 | reward over 32 steps, imagined / simulated |
 |---|---|---|---|---|---|
-| walk | 0.28 cm | 0.15° | 1.09 cm | 0.21° | 0.988 / 0.988 |
-| cartwheel | 1.08 cm | 0.55° | 2.92 cm | 1.25° | 0.898 / 0.896 |
-| flip | 1.37 cm | 0.56° | 17.58 cm | 1.67° | 0.880 / 0.880 |
-| side roll | 2.53 cm | 0.83° | 4.73 cm | 1.65° | 0.868 / 0.862 |
+| walk | 0.31 cm | 0.20° | 1.50 cm | 0.20° | 0.977 / 0.976 |
+| cartwheel | 2.12 cm | 1.39° | 9.80 cm | 2.91° | 0.882 / 0.880 |
+| flip | 2.09 cm | 0.62° | 8.82 cm | 2.33° | 0.815 / 0.823 |
+| side roll | 2.55 cm | 1.30° | 8.01 cm | 2.05° | 0.837 / 0.827 |
 
-At the training horizon (32 steps, 0.64 s) imagination is on average 0.3 to 2.5 cm from the simulator and
-its reward within 0.006 of the simulated one (0.02 at worst for one start). Beyond it, contact-rich and
-airborne phases drift: one flip start diverges to 56 cm by step 128.
+At the training horizon (32 steps, 0.64 s) imagination is on average 0.3 to 2.6 cm from the simulator and
+its reward within 0.01 of the simulated one (0.04 at worst for one start). Beyond it, contact-rich and
+airborne phases drift: by step 128 the root is 1.5 cm off on the walk and 8 to 10 cm on the other three
+clips, 20 cm at worst for one flip start.
 
 ## Documentation
 

@@ -16,7 +16,9 @@ we got there: until that commit the same information was a 6-number term in the 
   reference seen from the robot, as in SONIC: paper-compatible under that reading, not proven paper-exact.
 - In the goal, the observation is exactly Table A.1 and serves every goal interface sharing the decoder (paper App. B).
   In a 14k LAFAN A/B the two layouts match within one seed (heading error ≤ 2°, return 0.822 / 1 failed clip vs
-  0.796 / 3, same speed); the goal layout drifts faster in position. A BONES-SEED retrain is running.
+  0.796 / 3, same speed); the goal layout drifts faster in position. On BONES-SEED at iteration 144k the goal
+  layout (the shipped policy) fails 7 and 15 of 129,889 clips in two evaluations with return 0.940; the
+  observation layout failed 7 and 10 of 129,951 (6 and 9 of the shared 129,889) with return 0.930.
 
 ## 1. Preliminaries
 
@@ -291,9 +293,13 @@ the first 60 s. Mean normalised step return over the first 5 / 10 / 15 / 60 s: n
 
 ## 6. Status and open questions
 
-- **BONES-SEED.** The shipped `checkpoints/seed/model_144000.pt` has the observation layout and does not load on the
-  current code. A 160k-iteration retrain with the goal layout started on 2026-10-27, 21:02 Dubai time (10 to 13 h, log
-  `runs/seed/train_seed_goal_heading.log`); until it is evaluated, BONES-SEED numbers here are the observation layout's.
+- **BONES-SEED.** The shipped `checkpoints/seed/model_144000.pt` has the goal layout: iteration 144,000 of a
+  160k-iteration run on the 129,889-clip library (`runs/seed/2026-10-27_22-48-41_seed_goal_heading_filtered`). It
+  fails 7 and 15 clips in two full evaluations (6 in both) with mean normalised return 0.940 in each. The observation
+  layout's policy at the same iteration, trained on the 129,951 clips from before three filter rules, failed 7 and 10
+  (6 and 9 of the 129,889 clips both libraries share) with 0.930. So on BONES-SEED, too, the two layouts track about
+  equally well; the goal layout's failures are mostly handstands, the observation layout's were all outside the
+  named motion groups. One run per layout, and the libraries differ by 62 clips.
 - **One seed per arm.** The goal arm's 0.01 deficit per survived step and its faster drift may be this seed; a second
   seed of both arms (about 1 h each on one GPU) would tell.
 - **Position drift.** Neither layout observes position, so both drift, the goal arm faster: its mean root-position

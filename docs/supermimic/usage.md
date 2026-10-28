@@ -154,8 +154,8 @@ optimiser states, to stay under GitHub's 100 MB file limit) and the run's `param
 and `figures/` stay local (gitignored). It serves as `--run-dir` for `train_library.py --eval`,
 `view.py` and `imagine_video.py`; its `params/env.yaml` records the clip list under the training
 machine's paths, so on another machine add `--motions-dir data/motions/seed` (evaluation then uses the
-kept clips of `manifest.json`: 129,889 with the current filter, while the shipped checkpoint was trained and
-evaluated on 129,951, before the `off_wall`, `inchworm` and joint-speed rules). Loading it whole
+kept clips of `manifest.json`: 129,889 with the current filter, the library the shipped checkpoint was
+trained and evaluated on). Loading it whole
 (`SuperMimicRunner.load` without a part selection) starts fresh optimisers.
 
 ## Configuration
@@ -182,10 +182,10 @@ evaluated on 129,951, before the `off_wall`, `inchworm` and joint-speed rules). 
 
 ## Compute
 
-On one RTX PRO 6000 (Blackwell), 4096 envs: LAFAN1 about 0.21 s per iteration; BONES-SEED 0.22 s per
-iteration and about 43 GB of GPU memory, 9.7 h of training for 160k iterations, after 35-70 min of
-library loading (CPU-bound). A full-library watch evaluation needs another 29 GB and 10-12 min per
-checkpoint while the trainer runs (4.4 min alone), and slows the trainer to about 0.36 s per iteration.
+On one RTX PRO 6000 (Blackwell), 4096 envs: LAFAN1 about 0.21 s per iteration; BONES-SEED 0.21 s per
+iteration and about 44 GB of GPU memory, 9.4 h of training for 160k iterations, after 15-70 min of
+library loading (CPU-bound). A full-library watch evaluation needs another 29 GB and about 10 min per
+checkpoint while the trainer runs (4.5 min alone), and slows the trainer to about 0.35 s per iteration.
 
 ## Contact budget
 
