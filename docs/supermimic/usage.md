@@ -154,7 +154,7 @@ $PY tools/imagine_video.py --run-dir checkpoints/seed --clip cartwheel_R_003__A1
 
 `checkpoints/seed/` holds `model_<it>.pt` (policy, critic, world model and reset-sampler state, without
 optimiser states, to stay under GitHub's 100 MB file limit) and the run's `params/`. Its evaluation JSONs
-(`eval_library_model_144000.json` and a repeat, `eval_library_model_144000_repeat.json`) and `figures/`
+(`eval_library_model_144000.json` and a repeat, `repeat_eval_library_model_144000.json`) and `figures/`
 stay local (gitignored). It serves as `--run-dir` for `train_library.py --eval`,
 `view.py` and `imagine_video.py`; its `params/env.yaml` records the clip list under the training
 machine's paths, so on another machine add `--motions-dir data/motions/seed` (evaluation then uses the

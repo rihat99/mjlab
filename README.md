@@ -56,7 +56,7 @@ its tilt error 0.8; the normalised return divides the summed reward by the maxim
 The policy in `checkpoints/seed` is iteration 144,000 of a 160k-iteration run, the checkpoint with the fewest
 failed clips in the evaluations run during training. Over all 129,889 clips: **7–15 failed** in two
 evaluations (6 in both) and a mean normalised return of **0.940** in each
-(`checkpoints/seed/eval_library_model_144000.json` and `_repeat.json`, kept locally). Picking the lowest of 40
+(`checkpoints/seed/eval_library_model_144000.json` and `repeat_eval_library_model_144000.json`, kept locally). Picking the lowest of 40
 noisy counts picks a lucky draw: by the mean of two evaluations, 124,000 (8 and 10 failed) and 136,000 (10 and
 10) are at least as good, and two more runs of the 16 clips that failed at 144,000 fail 9 and 11 of them
 ([failures.md](docs/supermimic/failures.md)); we kept the rule. The counts move because evaluations are not

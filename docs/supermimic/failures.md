@@ -35,7 +35,7 @@ clips fail in 4 of 4 (`flip_180_R_003__A304`, `handstand_ff_start_270_R_001__A30
 fails 10.5 of these 16 on average; the first evaluation's 7 is the lowest of the four draws (7, 15, 9, 11). No clip
 returns the same value in any two runs (`Stop_backward_Walk_001__A017`: 0.918 once, 0.13 three times). Sources: the full
 evaluations `runs/seed/2026-10-27_22-48-41_seed_goal_heading_filtered/eval_library_model_144000.json` and
-`eval_library_model_144000_repeat.json`; the 16-clip runs `X_final_review/eval16_r1.json` and `eval16_r2.json` in the
+`repeat_eval_library_model_144000.json`; the 16-clip runs `X_final_review/eval16_r1.json` and `eval16_r2.json` in the
 diagnosis notes (`evaluate_library --checkpoint-file checkpoints/seed/model_144000.pt`).
 
 ## 1. Headline
